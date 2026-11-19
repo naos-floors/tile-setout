@@ -42,25 +42,33 @@
     return {
       id: uid(), name: isWall ? 'Wall' : 'Floor', kind,
       outline: isWall ? [[0, 0], [2400, 0], [2400, 2400], [0, 2400]] : [[0, 0], [3000, 0], [3000, 2500], [0, 2500]],
-      openings: [], tileId: null,
+      openings: [], doorways: [], place: { x: 0, y: 0 }, tileId: null,
       pattern: { type: isWall ? 'straight' : 'straight', joint: isWall ? 2 : 3, rotation: 0, ox: 0, oy: 0, offsetPct: 50, chevronAngle: 45, moduleSize: 200 },
-      settings: { spare: '', sliver: '', battenY: '', reuseOffcuts: true, primer: true, trimPerimeter: false, trimOpenings: isWall, trimExtra: 0 },
+      settings: { spare: '', sliver: '', battenY: '', reuseOffcuts: true, primer: true, trimPerimeter: false, trimOpenings: isWall, trimExtra: 0, border: { on: false, tileId: null, rows: 1 } },
       bg: null, ...o,
     };
+  }
+  function newGroup(name, mode, members, tileId, pattern) { return { id: uid(), name, mode, members, tileId, pattern: { ...pattern } }; }
+  /* bring older jobs up to date */
+  function migrate(job) {
+    job.groups = job.groups || []; job.images = job.images || {};
+    job.rooms.forEach(r => r.surfaces.forEach(s => {
+      s.doorways = s.doorways || []; s.place = s.place || { x: 0, y: 0 };
+      s.settings = s.settings || {}; if (!s.settings.border) s.settings.border = { on: false, tileId: null, rows: 1 };
+      if (s.bg && s.bg.dataUrl) { const id = uid(); job.images[id] = s.bg.dataUrl; delete s.bg.dataUrl; s.bg.img = id; }
+    }));
+    return job;
   }
   function newRoom(name = 'Room') { return { id: uid(), name, surfaces: [] }; }
   function newJob(name = 'New job') {
     const t = newTile();
-    const r = newRoom('Bathroom');
-    const s = newSurface('wall', { name: 'Wall A', tileId: t.id });
-    r.surfaces.push(s);
-    return { id: uid(), name, client: '', address: '', notes: '', created: Date.now(), updated: Date.now(), tiles: [t], rooms: [r] };
+    return { id: uid(), name, client: '', address: '', notes: '', created: Date.now(), updated: Date.now(), tiles: [t], rooms: [], groups: [], images: {} };
   }
 
   const Store = {
-    uid, newJob, newRoom, newSurface, newTile, getSettings, saveSettings, DEFAULT_MAT,
+    uid, newJob, newRoom, newSurface, newTile, newGroup, migrate, getSettings, saveSettings, DEFAULT_MAT,
     async list() { return tx('readonly', s => s.getAll()).then(r => (r || []).sort((a, b) => b.updated - a.updated)); },
-    async get(id) { return tx('readonly', s => s.get(id)); },
+    async get(id) { const j = await tx('readonly', s => s.get(id)); return j ? migrate(j) : j; },
     async put(job) { job.updated = Date.now(); return tx('readwrite', s => s.put(JSON.parse(JSON.stringify(job)))); },
     async del(id) { return tx('readwrite', s => s.delete(id)); },
   };

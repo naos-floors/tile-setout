@@ -138,7 +138,8 @@
     if (ops.length) {
       try { mp = PC.difference(mp, ...ops.map(o => [[...rectPts(+o.x, +o.y, +o.w, +o.h), [+o.x, +o.y]]])); } catch (e) { console.warn(e); }
     }
-    return { mp, outline, ops, bb: bbox(outline), opBoxes: ops.map(o => ({ x0: +o.x, y0: +o.y, x1: +o.x + +o.w, y1: +o.y + +o.h })) };
+    const units = (surface.openings || []).filter(o => o.w > 0 && o.h > 0 && o.tiled);
+    return { mp, outline, ops, units, bb: bbox(outline), opBoxes: ops.map(o => ({ x0: +o.x, y0: +o.y, x1: +o.x + +o.w, y1: +o.y + +o.h })) };
   }
 
   // ---------- lay tiles ----------
@@ -225,17 +226,12 @@
     return piece;
   }
 
-  function layout(surface, tile, settings = {}) {
-    const region = surfaceRegion(surface);
-    if (!region || !tile) return null;
-    const pat = surface.pattern;
+  function layPieces(region, tile, pat, settings, noFast) {
     const totalAng = patternRotation(pat);
     const laid = layTiles(region, tile, pat);
     const pieces = [];
-    let raw = 0;
     for (const t of laid.tiles) {
-      if (t.bb.x1 <= region.bb.x0 || t.bb.x0 >= region.bb.x1) continue;
-      if (fullyInside(t, region)) {
+      if (!noFast && fullyInside(t, region)) {
         pieces.push({ poly: [t.pts], area: t.cell.ownW * t.cell.ownH, w: t.cell.ownW, h: t.cell.ownH, kind: 'full', sizeIdx: t.cell.sizeIdx, minDim: Math.min(t.cell.ownW, t.cell.ownH) });
         continue;
       }
@@ -246,12 +242,150 @@
         if (p.area < 25 || p.minDim < 1) continue; // ignore crumbs (<5×5mm)
         pieces.push(p);
       }
-      raw++;
     }
+    return { pieces, laid, totalAng };
+  }
+
+  // edge strips (inward) used for borders
+  function edgeStrips(outline, d) {
+    const sign = ringArea(outline) >= 0 ? 1 : -1;
+    return outline.map((A, i) => {
+      const B = outline[(i + 1) % outline.length];
+      const len = Math.hypot(B[0] - A[0], B[1] - A[1]); if (len < 1) return null;
+      const u = [(B[0] - A[0]) / len, (B[1] - A[1]) / len], n = [-u[1] * sign, u[0] * sign];
+      const P = (x, y) => [A[0] + u[0] * x + n[0] * y, A[1] + u[1] * x + n[1] * y];
+      const pts = [P(0, 0), P(len, 0), P(len, d), P(0, d)];
+      return { A, u, n, len, pts, ang: Math.atan2(u[1], u[0]) * 180 / Math.PI, P };
+    }).filter(Boolean);
+  }
+
+  function layout(surface, tile, settings = {}, extra = {}) {
+    const region = surfaceRegion(surface);
+    if (!region || !tile) return null;
+    const pat = surface.pattern;
+    const g = +pat.joint || 0;
+    const unit = buildUnit(tile, pat);
+    const sizes = unit.sizes.map(z => ({ ...z, tile }));
+    let fieldRegion = region, borderPieces = [], borderArea = 0, borderInfo = null;
+    const bset = surface.settings && surface.settings.border;
+    const bt = extra.borderTile;
+    if (bset && bset.on && bt) {
+      const Lb = Math.max(+bt.w, +bt.h), Wb = Math.min(+bt.w, +bt.h), rows = Math.max(1, +bset.rows || 1);
+      const d = rows * (Wb + g);
+      const strips = edgeStrips(region.outline, d);
+      try {
+        const U = PC.union(...strips.map(st => [[...st.pts, st.pts[0]]]));
+        const borderMP = PC.intersection(region.mp, U);
+        const fieldMP = PC.difference(region.mp, U);
+        fieldRegion = { ...region, mp: fieldMP };
+        borderArea = mpArea(borderMP);
+        const bIdx = sizes.length; sizes.push({ w: Lb, h: Wb, label: `Border ${Lb}×${Wb}`, tile: bt, border: true });
+        const assigned = [];
+        strips.forEach(st => {
+          let S = PC.intersection(borderMP, [[...st.pts, st.pts[0]]]);
+          if (assigned.length && S.length) S = PC.difference(S, ...assigned);
+          assigned.push([[...st.pts, st.pts[0]]]);
+          if (!S.length) return;
+          const step = Lb + g; const c0 = st.len / 2 - Lb / 2;
+          const k0 = Math.floor((-Lb - c0) / step) - 1, k1 = Math.ceil((st.len - c0) / step) + 1;
+          for (let r = 0; r < rows; r++) for (let k = k0; k <= k1; k++) {
+            const x = c0 + k * step, y = r * (Wb + g);
+            const pts = [st.P(x, y), st.P(x + Lb, y), st.P(x + Lb, y + Wb), st.P(x, y + Wb)];
+            let res; try { res = PC.intersection([[...pts, pts[0]]], S); } catch (e) { continue; }
+            for (const poly of res) {
+              const pc = analysePiece(poly, { ownW: Lb, ownH: Wb, ang: st.ang, sizeIdx: bIdx }, 0, settings);
+              if (pc.area < 25 || pc.minDim < 1) continue; pc.border = true; borderPieces.push(pc);
+            }
+          }
+        });
+        borderInfo = { width: d, rows, tile: bt };
+      } catch (e) { console.warn('border', e); }
+    }
+    const lp = layPieces(fieldRegion, tile, pat, settings, fieldRegion !== region);
+    const pieces = lp.pieces.concat(borderPieces);
     const net = mpArea(region.mp);
-    const res = { region, pieces, unit: laid.unit, totalAng, tooMany: laid.tooMany, netArea: net };
+    const res = { region, pieces, unit, sizes, totalAng: lp.totalAng, tooMany: lp.laid.tooMany, netArea: net, fieldArea: net - borderArea, borderArea, borderInfo, rawTiles: lp.laid.tiles };
     res.stats = countTiles(res, settings);
+    res.units = unitInfo(region, res, g);
+    res.doorways = (surface.doorways || []).map(d => ({ ...d, pts: doorwayPts(surface, d) })).filter(d => d.pts);
     return res;
+  }
+
+  // kitchen units etc. that are tiled under: area under, and where joints fall against their edges
+  function unitInfo(region, res, g) {
+    return region.units.map(u => {
+      const rect = [[...rectPts(+u.x, +u.y, +u.w, +u.h), [+u.x, +u.y]]];
+      const ub = { x0: +u.x, y0: +u.y, x1: +u.x + +u.w, y1: +u.y + +u.h };
+      let under = 0, count = 0;
+      for (const p of res.pieces) {
+        const b = bbox(p.poly[0]); if (!bboxOverlap(b, ub)) continue;
+        try { const a = mpArea(PC.intersection([p.poly.map(r => [...r, r[0]])], rect)); under += a; const sz = res.sizes[p.sizeIdx]; if (a > 0.5 * sz.w * sz.h || (p.kind !== 'full' && a > 0.5 * p.area)) count++; } catch (e) { }
+      }
+      const edges = [
+        { name: 'left', a: [ub.x0, ub.y0], b: [ub.x0, ub.y1], out: [-1, 0] }, { name: 'right', a: [ub.x1, ub.y0], b: [ub.x1, ub.y1], out: [1, 0] },
+        { name: 'bottom', a: [ub.x0, ub.y0], b: [ub.x1, ub.y0], out: [0, -1] }, { name: 'top', a: [ub.x0, ub.y1], b: [ub.x1, ub.y1], out: [0, 1] }];
+      const fronts = [];
+      for (const e of edges) {
+        const mid = [(e.a[0] + e.b[0]) / 2 + e.out[0] * 5, (e.a[1] + e.b[1]) / 2 + e.out[1] * 5];
+        if (!pointInRing(mid, region.outline)) continue; // against a wall: not a visible front
+        const vert = e.out[1] === 0; const line = vert ? e.a[0] : e.a[1];
+        const lo = vert ? Math.min(e.a[1], e.b[1]) : Math.min(e.a[0], e.b[0]), hi = vert ? Math.max(e.a[1], e.b[1]) : Math.max(e.a[0], e.b[0]);
+        let best = null;
+        for (const t of res.rawTiles) {
+          const pts = t.pts;
+          for (let k = 0; k < pts.length; k++) {
+            const P = pts[k], Q = pts[(k + 1) % pts.length];
+            const parallel = vert ? Math.abs(P[0] - Q[0]) < 0.5 : Math.abs(P[1] - Q[1]) < 0.5; if (!parallel) continue;
+            const s0 = vert ? Math.min(P[1], Q[1]) : Math.min(P[0], Q[0]), s1 = vert ? Math.max(P[1], Q[1]) : Math.max(P[0], Q[0]);
+            if (s1 < lo || s0 > hi) continue;
+            const c = vert ? P[0] : P[1]; const dist = (c - line) * (vert ? e.out[0] : e.out[1]);
+            if (!best || Math.abs(dist) < Math.abs(best)) best = dist;
+          }
+        }
+        if (best == null) { fronts.push({ edge: e.name, note: 'joints run at an angle with this pattern — check the cuts along this line on the drawing' }); continue; }
+        // tile edges sit g/2 either side of a joint centre line
+        let jd = best; if (Math.abs(jd) <= g / 2 + 0.01) jd = 0; else jd = jd > 0 ? jd - g / 2 : jd + g / 2;
+        fronts.push({ edge: e.name, dist: Math.round(Math.abs(jd)), side: jd === 0 ? 'on' : jd > 0 ? 'in front' : 'under', a: e.a, b: e.b, out: e.out });
+      }
+      return { name: u.name || 'Units', m2: under / 1e6, tiles: count, fronts };
+    });
+  }
+
+  function doorwayPts(surface, d) {
+    const o = surface.outline; if (!o || o.length < 2) return null;
+    const i = Math.min(Math.max(0, d.edge | 0), o.length - 1); const A = o[i], B = o[(i + 1) % o.length];
+    const len = Math.hypot(B[0] - A[0], B[1] - A[1]); if (len < 1) return null;
+    const u = [(B[0] - A[0]) / len, (B[1] - A[1]) / len];
+    const p0 = Math.max(0, Math.min(len, +d.pos || 0)), p1 = Math.max(0, Math.min(len, p0 + (+d.w || 0)));
+    return [[A[0] + u[0] * p0, A[1] + u[1] * p0], [A[0] + u[0] * p1, A[1] + u[1] * p1]];
+  }
+  function pointToDoorway(outline, p1, p2) {
+    // find the outline edge the doorway lies on: returns {edge, pos, w}
+    let best = null;
+    outline.forEach((A, i) => {
+      const B = outline[(i + 1) % outline.length]; const len = Math.hypot(B[0] - A[0], B[1] - A[1]); if (len < 1) return;
+      const u = [(B[0] - A[0]) / len, (B[1] - A[1]) / len];
+      const proj = p => (p[0] - A[0]) * u[0] + (p[1] - A[1]) * u[1];
+      const dist = p => Math.abs((p[0] - A[0]) * u[1] - (p[1] - A[1]) * u[0]);
+      const dd = dist(p1) + dist(p2);
+      if (!best || dd < best.dd) { const a = proj(p1), b = proj(p2); best = { dd, edge: i, pos: Math.round(Math.max(0, Math.min(a, b))), w: Math.round(Math.abs(b - a)) }; }
+    });
+    return best;
+  }
+
+  /* Change the length of edge i. Square shapes stay square: everything beyond the edge's end moves with it. */
+  function stretchEdge(surface, i, newLen) {
+    const o = surface.outline, n = o.length; const A = o[i], B = o[(i + 1) % n];
+    const len = Math.hypot(B[0] - A[0], B[1] - A[1]); if (len < 1 || !(newLen > 0)) return false;
+    const u = [(B[0] - A[0]) / len, (B[1] - A[1]) / len]; const delta = newLen - len;
+    const ax = Math.abs(u[0]) > 0.9999 ? 0 : Math.abs(u[1]) > 0.9999 ? 1 : -1;
+    if (ax >= 0) {
+      const sg = Math.sign(u[ax]); const thr = B[ax];
+      o.forEach(v => { if ((v[ax] - thr) * sg >= -0.5) v[ax] = Math.round((v[ax] + delta * sg) * 10) / 10; });
+      const key = ax === 0 ? 'x' : 'y', sz = ax === 0 ? 'w' : 'h';
+      (surface.openings || []).forEach(op => { const c = +op[key] + +op[sz] / 2; if ((c - thr) * sg >= 0) op[key] = Math.round(+op[key] + delta * sg); });
+    } else { o[(i + 1) % n] = [Math.round((B[0] + u[0] * delta) * 10) / 10, Math.round((B[1] + u[1] * delta) * 10) / 10]; }
+    return true;
   }
 
   // ---------- counting + offcuts ----------
@@ -259,7 +393,7 @@
     const kerf = settings.kerf ?? 3;
     const reuse = settings.reuseOffcuts !== false;
     const minUse = settings.minOffcut ?? 30;
-    const sizes = res.unit.sizes;
+    const sizes = res.sizes;
     const per = sizes.map(s => ({ label: s.label, w: s.w, h: s.h, full: 0, cut: 0, notch: 0, fromOffcut: 0, newForCuts: 0, needed: 0 }));
     const offcuts = sizes.map(() => []);
     let slivers = 0, minCut = Infinity;
@@ -340,17 +474,18 @@
     const st = res.stats;
     const spare = surface.settings && surface.settings.spare != null && surface.settings.spare !== '' ? +surface.settings.spare : (PATTERNS[surface.pattern.type]?.waste ?? 5);
     out.spare = spare;
-    out.tiles = st.per.map(s => {
+    out.tiles = st.per.map((s, i) => {
       const order = Math.ceil(s.needed * (1 + spare / 100));
+      const sz = res.sizes[i]; const t = sz.tile || tile;
       const tileM2 = s.w * s.h / 1e6;
       let boxes = null;
-      const modular = surface.pattern.type === 'modular';
-      if (!modular && +tile.perBox > 0) boxes = Math.ceil(order / +tile.perBox);
-      else if (!modular && +tile.m2PerBox > 0) boxes = Math.ceil(order * tileM2 / +tile.m2PerBox);
-      return { label: s.label, needed: s.needed, order, boxes, m2: order * tileM2, full: s.full, cuts: s.cut + s.notch, fromOffcut: s.fromOffcut };
+      const modular = surface.pattern.type === 'modular' && !sz.border;
+      if (!modular && +t.perBox > 0) boxes = Math.ceil(order / +t.perBox);
+      else if (!modular && +t.m2PerBox > 0) boxes = Math.ceil(order * tileM2 / +t.m2PerBox);
+      return { label: sz.border ? `${t.name} (border)` : s.label, tileId: t.id, tileName: t.name, border: !!sz.border, modular, needed: s.needed, order, boxes, m2: order * tileM2, full: s.full, cuts: s.cut + s.notch, fromOffcut: s.fromOffcut };
     });
     if (surface.pattern.type === 'modular' && +tile.m2PerBox > 0) {
-      const totM2 = out.tiles.reduce((s, t) => s + t.m2, 0);
+      const totM2 = out.tiles.filter(t => t.modular).reduce((s, t) => s + t.m2, 0);
       out.modularBoxes = Math.ceil(totM2 / +tile.m2PerBox);
     }
     // adhesive
@@ -358,8 +493,11 @@
     out.adhesive = { name: mat.adhName, bags: Math.ceil(m2 / adhCov * (1 + (+mat.adhExtra || 0) / 100) - 1e-9), coverage: adhCov, bagKg: mat.adhBagKg };
     // grout
     const jl = jointPerM2(res.unit, g);
-    const kgPerM2 = jl * g * depth * (+mat.groutDensity || 1.6) / 1e6;
-    const groutKg = kgPerM2 * m2 * (1 + (+mat.groutExtra || 0) / 100);
+    const dens = +mat.groutDensity || 1.6;
+    const kgPerM2 = jl * g * depth * dens / 1e6;
+    let rawKg = kgPerM2 * (res.fieldArea / 1e6);
+    if (res.borderInfo) { const bt = res.borderInfo.tile; const A = +bt.w, B = +bt.h; rawKg += (A + B) / (A * B) * 1e6 * g * (+bt.thick || depth) * dens / 1e6 * (res.borderArea / 1e6); }
+    const groutKg = rawKg * (1 + (+mat.groutExtra || 0) / 100);
     out.grout = { name: mat.groutName, kgPerM2, kg: groutKg, bags: g > 0 ? Math.ceil(groutKg / (+mat.groutBagKg || 5) - 1e-9) : 0, bagKg: mat.groutBagKg };
     // primer
     const primerOn = surface.settings?.primer !== false;
@@ -376,6 +514,8 @@
     const tilesNeeded = st.needed;
     const spc = tilesNeeded * (+mat.spacersPerTile || 0);
     out.spacers = { count: Math.ceil(spc), packs: spc > 0 ? Math.ceil(spc / (+mat.spacerPack || 100)) : 0 };
+    out.thresholds = (res.doorways || []).map(d => ({ name: d.name || 'Doorway', w: Math.round(+d.w) }));
+    out.units = (res.units || []).map(u => ({ name: u.name, m2: u.m2, tiles: u.tiles }));
     return out;
   }
 
@@ -411,11 +551,134 @@
       addY(b.y0 - ref.y1 - g, `Full tile under ${nm}`); addY(b.y1 - ref.y0, `Full tile above ${nm}`);
       addY(ocy - (ref.y0 + ref.y1) / 2, `Tile centred on ${nm}`);
     });
+    (region.units || []).forEach((o, i) => {
+      const nm = o.name || 'units';
+      const b = bbox(rectPts(+o.x, +o.y, +o.w, +o.h).map(p => rot(p, -a)));
+      addX(b.x0 + g / 2 - ref.x0, `Joint on ${nm} left edge`); addX(b.x1 + g / 2 - ref.x0, `Joint on ${nm} right edge`);
+      addY(b.y0 + g / 2 - ref.y0, `Joint on ${nm} bottom edge`); addY(b.y1 + g / 2 - ref.y0, `Joint on ${nm} top edge`);
+    });
+    const special = [];
+    (surface.doorways || []).forEach((d, i) => {
+      const pts = doorwayPts(surface, d); if (!pts) return;
+      const nm = d.name || `doorway ${i + 1}`;
+      const P = pts.map(p => rot(p, -a)); const mx = (P[0][0] + P[1][0]) / 2, my = (P[0][1] + P[1][1]) / 2;
+      if (Math.abs(P[1][0] - P[0][0]) >= Math.abs(P[1][1] - P[0][1])) { addX(mx - (ref.x0 + ref.x1) / 2, `Tile centred on ${nm}`); addX(mx - ref.x1 - g / 2, `Joint centred on ${nm}`); }
+      else { addY(my - (ref.y0 + ref.y1) / 2, `Tile centred on ${nm}`); addY(my - ref.y1 - g / 2, `Joint centred on ${nm}`); }
+    });
+    // herringbone family: put the straight joint line (through the V points) on the centre line
+    const hb = herringboneAxis(tile, pat);
+    if (hb) {
+      const C = [(region.bb.x0 + region.bb.x1) / 2, (region.bb.y0 + region.bb.y1) / 2];
+      const place = (pt, label) => { const q = rot(hb.P, a); special.push({ o: [pt[0] - q[0], pt[1] - q[1]], label }); const q2 = rot([hb.P[0] + hb.half[0], hb.P[1] + hb.half[1]], a); special.push({ o: [pt[0] - q2[0], pt[1] - q2[1]], label: label + ' (half step along)' }); };
+      place(C, 'Herringbone joint line on centre');
+      (surface.doorways || []).forEach((d, i) => { const pts = doorwayPts(surface, d); if (pts) place([(pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2], `Herringbone joint line centred on ${d.name || 'doorway ' + (i + 1)}`); });
+    }
     const ded = arr => { const o = []; for (const c of arr) if (!o.some(d => Math.abs(d.v - c.v) < 0.5)) o.push(c); return o; };
-    return { xs: ded(xs), ys: ded(ys), a };
+    return { xs: ded(xs), ys: ded(ys), a, special };
   }
 
   function toAreaOrigin(xp, yp, a) { return rot([xp, yp], a); }
+
+  // point on the centre of the straight joint line through the V points, and the direction of that line (pattern frame)
+  function herringboneAxis(tile, pat) {
+    if (!['herringbone', 'herringbone45', 'doubleHerringbone'].includes(pat.type)) return null;
+    const g = +pat.joint || 0; const L = Math.max(+tile.w, +tile.h), W = Math.min(+tile.w, +tile.h);
+    const Wt = pat.type === 'doubleHerringbone' ? 2 * W + g : W;
+    const b = Wt + g;
+    return { P: [L + g / 2, Wt / 2], dir: [Math.SQRT1_2, Math.SQRT1_2], half: [b / 2, b / 2] };
+  }
+
+  /* Set-out reference for fitters: a joint point near the middle, the continuous joint lines through it, and distances to the area edges */
+  function setoutRef(surface, tile) {
+    const region = surfaceRegion(surface); if (!region || !tile) return null;
+    const pat = surface.pattern; const a = rad(patternRotation(pat)); const unit = buildUnit(tile, pat); const g = +pat.joint || 0;
+    const O = [+pat.ox || 0, +pat.oy || 0];
+    const hb = herringboneAxis(tile, pat);
+    const ref = bbox(unit.cells[0].pts);
+    const base = hb ? hb.P : [ref.x0 - g / 2, ref.y0 - g / 2];
+    const C = [(region.bb.x0 + region.bb.x1) / 2, (region.bb.y0 + region.bb.y1) / 2];
+    const Cp = rot([C[0] - O[0], C[1] - O[1]], -a);
+    const [t1, t2] = [unit.t1, unit.t2]; const det = t1[0] * t2[1] - t1[1] * t2[0];
+    const dx = Cp[0] - base[0], dy = Cp[1] - base[1];
+    let i = Math.round((dx * t2[1] - dy * t2[0]) / det), j = Math.round((t1[0] * dy - t1[1] * dx) / det);
+    let Pp = [base[0] + i * t1[0] + j * t2[0], base[1] + i * t1[1] + j * t2[1]];
+    if (hb) { // slide along the joint line to the point nearest the centre
+      const s = (Cp[0] - Pp[0]) * hb.dir[0] + (Cp[1] - Pp[1]) * hb.dir[1]; const step = Math.hypot(hb.half[0], hb.half[1]) * 2;
+      const k = Math.round(s / step); Pp = [Pp[0] + hb.dir[0] * step * k, Pp[1] + hb.dir[1] * step * k];
+    }
+    const r = rot(Pp, a); const P = [r[0] + O[0], r[1] + O[1]];
+    const t = pat.type; let dirs = [];
+    if (['straight', 'diagonal', 'stackVertical', 'basketweave'].includes(t)) dirs = [[1, 0], [0, 1]];
+    else if (['brick', 'third', 'quarter', 'customOffset'].includes(t)) dirs = [[1, 0]];
+    else if (t === 'brickVertical') dirs = [[0, 1]];
+    else if (hb) dirs = [hb.dir];
+    dirs = dirs.map(d => rot(d, a));
+    const bb = region.bb;
+    return { P, dirs, dims: { left: P[0] - bb.x0, right: bb.x1 - P[0], bottom: P[1] - bb.y0, top: bb.y1 - P[1] }, herringbone: !!hb };
+  }
+
+  /* Best start for several areas set out together.
+     items: [{surface, off:[x,y]}] in one view frame. mode 'plan' = one shared origin; 'strip' = shared height, each wall finds its own across position. */
+  function bestForSet(items, tile, settings, mode, top = 6) {
+    if (!items.length) return [];
+    const pat0 = items[0].surface.pattern;
+    // pseudo surface covering everything
+    let pts = []; const ops = [], doors = [];
+    items.forEach(it => {
+      it.surface.outline.forEach(p => pts.push([p[0] + it.off[0], p[1] + it.off[1]]));
+      (it.surface.openings || []).forEach(o => ops.push({ ...o, x: +o.x + it.off[0], y: +o.y + it.off[1] }));
+    });
+    const b = bbox(pts);
+    const pseudo = { kind: items[0].surface.kind, outline: rectPts(b.x0, b.y0, b.w, b.h), openings: ops, pattern: pat0, settings: items[0].surface.settings || {}, doorways: [] };
+    // doorways as tiny pseudo openings are not needed: add their centres as candidates through each member
+    const cand = startCandidates(pseudo, tile);
+    items.forEach(it => {
+      const c2 = startCandidates(it.surface, tile);
+      c2.xs.forEach(x => { if (/doorway|Door|centred on/i.test(x.label)) cand.xs.push({ v: x.v + rot(it.off, -cand.a)[0], label: `${x.label} (${it.surface.name})` }); });
+      c2.ys.forEach(y => { if (/doorway|Door|centred on/i.test(y.label)) cand.ys.push({ v: y.v + rot(it.off, -cand.a)[1], label: `${y.label} (${it.surface.name})` }); });
+      c2.special.forEach(sp => cand.special.push({ o: [sp.o[0] + it.off[0], sp.o[1] + it.off[1]], label: `${sp.label} (${it.surface.name})` }));
+    });
+    const evalAt = (o, perItem) => {
+      let slivers = 0, needed = 0, cuts = 0, minCut = Infinity; const each = [];
+      for (const it of items) {
+        const oo = perItem ? perItem(it) : o;
+        const s2 = { ...it.surface, pattern: { ...it.surface.pattern, ox: oo[0] - it.off[0], oy: oo[1] - it.off[1] } };
+        const r = layout(s2, tile, settings); if (!r) continue;
+        slivers += r.stats.slivers; needed += r.stats.needed; cuts += r.stats.cuts; if (r.stats.minCut != null) minCut = Math.min(minCut, r.stats.minCut);
+        each.push(oo);
+      }
+      const stats = { slivers, needed, cuts, minCut: isFinite(minCut) ? minCut : null };
+      return { stats, score: score({ stats }, tile), each };
+    };
+    const results = [];
+    if (mode === 'strip') {
+      // shared height; per wall best across-position
+      const ys = cand.ys;
+      for (const Y of ys) {
+        const perWall = items.map(it => {
+          const cw = startCandidates(it.surface, tile); let best = null;
+          for (const X of cw.xs) {
+            const o = toAreaOrigin(X.v, Y.v - rot(it.off, -cw.a)[1], cw.a);
+            const s2 = { ...it.surface, pattern: { ...it.surface.pattern, ox: o[0], oy: o[1] } };
+            const r = layout(s2, tile, settings); if (!r) continue;
+            const sc = score(r, tile); if (!best || sc > best.sc) best = { sc, ox: o[0], oy: o[1], label: X.label, stats: r.stats };
+          }
+          return best;
+        });
+        if (perWall.some(p => !p)) continue;
+        const st = perWall.reduce((s, p) => ({ slivers: s.slivers + p.stats.slivers, needed: s.needed + p.stats.needed, cuts: s.cuts + p.stats.cuts, minCut: Math.min(s.minCut, p.stats.minCut ?? Infinity) }), { slivers: 0, needed: 0, cuts: 0, minCut: Infinity });
+        if (!isFinite(st.minCut)) st.minCut = null;
+        results.push({ label: `Courses: ${Y.label}`, walls: perWall.map(p => ({ ox: p.ox, oy: p.oy, label: p.label })), stats: st, score: score({ stats: st }, tile) });
+      }
+    } else {
+      for (const X of cand.xs) for (const Y of cand.ys) { const o = toAreaOrigin(X.v, Y.v, cand.a); const r = evalAt(o); results.push({ ox: o[0], oy: o[1], label: `${X.label} · ${Y.label}`, stats: r.stats, score: r.score }); }
+      for (const sp of cand.special) { const r = evalAt(sp.o); results.push({ ox: sp.o[0], oy: sp.o[1], label: sp.label, stats: r.stats, score: r.score + 1 }); }
+    }
+    results.sort((p, q) => q.score - p.score);
+    const out = [];
+    for (const r of results) { if (!out.some(o => o.stats.needed === r.stats.needed && Math.abs((o.stats.minCut || 0) - (r.stats.minCut || 0)) < 0.5 && o.stats.cuts === r.stats.cuts)) out.push(r); if (out.length >= top) break; }
+    return out;
+  }
 
   function score(res, tile) {
     const st = res.stats;
@@ -434,6 +697,11 @@
       const res = layout(s2, tile, settings);
       if (!res) continue;
       results.push({ ox: o[0], oy: o[1], label: `${X.label} · ${Y.label}`, xLabel: X.label, yLabel: Y.label, stats: res.stats, score: score(res, tile) });
+    }
+    for (const sp of startCandidates(surface, tile).special) {
+      const s2 = { ...surface, pattern: { ...surface.pattern, ox: sp.o[0], oy: sp.o[1] } };
+      const res = layout(s2, tile, settings); if (!res) continue;
+      results.push({ ox: sp.o[0], oy: sp.o[1], label: sp.label, stats: res.stats, score: score(res, tile) + 1 });
     }
     results.sort((p, q) => q.score - p.score);
     const out = [];
@@ -468,5 +736,5 @@
     return { pts: p, dx: -b.x0, dy: -b.y0 };
   }
 
-  window.Geo = { PATTERNS, buildUnit, layTiles, layout, cutList, materials, findBestStarts, startCandidates, toAreaOrigin, surfaceRegion, patternRotation, wallsToOutline, outlineToWalls, normaliseOutline, bbox, rectPts, ringArea, perimeter, polyArea, mpArea, rot, rad, stripClose };
+  window.Geo = { PATTERNS, buildUnit, layTiles, layout, setoutRef, bestForSet, stretchEdge, doorwayPts, pointToDoorway, herringboneAxis, pointInRing, cutList, materials, findBestStarts, startCandidates, toAreaOrigin, surfaceRegion, patternRotation, wallsToOutline, outlineToWalls, normaliseOutline, bbox, rectPts, ringArea, perimeter, polyArea, mpArea, rot, rad, stripClose };
 })();

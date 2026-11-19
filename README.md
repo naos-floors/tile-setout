@@ -16,7 +16,7 @@ This is an offline tile set-out web app for Naos Floors. It runs on phones, tabl
 Open the app once while you have signal. After that it works with no signal at all.
 
 ## Updating
-When the files change, upload the new versions, and change `VERSION` in `sw.js` (for example `tso-v1.0.1`). Phones pick up the update the next time the app is opened with signal.
+When the files change, upload the new versions over the old ones. `VERSION` in `sw.js` is already bumped in each release from Claude (this one is `tso-v1.1.0`); if you edit files yourself, change it too. Phones pick up the update the next time the app is opened with signal.
 
 ## Data
 Jobs are saved on each device. To move a job between devices, use **Save job file** on the job, then **Open job file** on the other device. You can keep the job files in OneDrive.
