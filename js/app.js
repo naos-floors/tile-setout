@@ -13,7 +13,7 @@
   const app = $('#app');
   const r1 = n => Math.round(n * 10) / 10;
   const fmt = (n, d = 0) => (n == null || !isFinite(n)) ? '-' : (+n).toLocaleString('en-GB', { maximumFractionDigits: d, minimumFractionDigits: d });
-  const OP_TYPES = { door: 'Door', window: 'Window', niche: 'Niche', bath: 'Bath', tray: 'Shower tray', unit: 'Kitchen units', other: 'Other' };
+  const OP_TYPES = { door: 'Door', window: 'Window', niche: 'Niche', bath: 'Bath', tray: 'Shower tray', unit: 'Kitchen units', other: 'Not tiled' };
   const STRIP_GAP = 600;
 
   function toast(msg, ms = 2400) { $$('.toast').forEach(t => t.remove()); const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg; document.body.appendChild(t); setTimeout(() => t.remove(), ms); }
@@ -24,7 +24,10 @@
     return m;
   }
   let saveT = null;
-  function save() { clearTimeout(saveT); saveT = setTimeout(() => S.job && Store.put(S.job).catch(e => toast('Could not save: ' + e.message)), 350); }
+  function save() {
+    if (syncLinks()) { requestDraw && setTimeout(() => { requestDraw(); if (S.viewId && ['shape', 'openings'].includes(S.tab)) renderPane(); }, 0); }
+    clearTimeout(saveT); saveT = setTimeout(() => S.job && Store.put(S.job).catch(e => toast('Could not save: ' + e.message)), 350);
+  }
   function netPill() { return navigator.onLine ? '' : '<span class="offline">Offline</span>'; }
   const onNet = () => { $$('.netslot').forEach(e => e.innerHTML = netPill()); if (S.tab === 'drawing' && S.viewId) renderPane(); };
   window.addEventListener('online', onNet); window.addEventListener('offline', onNet);
@@ -35,7 +38,7 @@
     if (!S.job) return; const j = snap();
     if (S.undo[S.undo.length - 1] !== j) { S.undo.push(j); if (S.undo.length > 80) S.undo.shift(); S.redo = []; }
   }
-  function restore(str) { const imgs = S.job.images; S.job = JSON.parse(str); S.job.images = imgs; S.cache.clear(); S.best = null; save(); route(); }
+  function restore(str) { const imgs = S.job.images; S.job = JSON.parse(str); S.job.images = imgs; S.cache.clear(); S.best = null; resetSigs(); save(); route(); }
   function undo() {
     if (!S.job) return; const cur = snap();
     while (S.undo.length && S.undo[S.undo.length - 1] === cur) S.undo.pop();
@@ -52,24 +55,47 @@
 
   // ---------- model helpers ----------
   function findSurface(id) { if (!S.job) return {}; for (const r of S.job.rooms) for (const s of r.surfaces) if (s.id === id) return { room: r, surface: s }; return {}; }
+  function allSurfacesOf(job) { return job.rooms.flatMap(r => r.surfaces); }
   function allSurfaces() { return S.job.rooms.flatMap(r => r.surfaces.map(s => ({ room: r, surface: s }))); }
   function groupOf(s) { return (S.job.groups || []).find(g => g.members.includes(s.id)) || null; }
   function getGroup(id) { return (S.job.groups || []).find(g => g.id === id) || null; }
-  function tileById(id) { return S.job.tiles.find(t => t.id === id) || S.job.tiles[0]; }
-  function tileOf(s) { const g = groupOf(s); return tileById(g ? g.tileId : s.tileId); }
+  function tileById(id) { return S.job.tiles.find(t => t.id === id) || S.job.tiles[0] || null; }
+  function tileOf(s) { const g = groupOf(s); return tileById(g && g.tileMode !== 'separate' ? g.tileId : s.tileId); }
+  function tileTarget(s) { const g = groupOf(s); return g && g.tileMode !== 'separate' ? g : s; }
+  /* walls side by side without gaps: where each wall starts (in its own x), for tiles carrying round corners */
+  function stripCum(g) { const m = new Map(); let x = 0; g.members.forEach(id => { const s = findSurface(id).surface; if (!s) return; const b = Geo.bbox(s.outline); m.set(id, x - b.x0); x += b.w; }); return m; }
+  const cornerAllow = () => +S.settings.kerf || 3;
   function borderTileOf(s) { const b = s.settings.border; return b && b.on ? tileById(b.tileId) : null; }
   /* the surface as the engine should see it: group pattern applied in the area's own coordinates */
   function eff(s) {
     const g = groupOf(s); if (!g) return s;
     const pl = s.place || { x: 0, y: 0 };
-    const pattern = g.mode === 'strip' ? { ...g.pattern, ox: +s.pattern.ox || 0, oy: +g.pattern.oy || 0 } : { ...g.pattern, ox: (+g.pattern.ox || 0) - pl.x, oy: (+g.pattern.oy || 0) - pl.y };
+    let pattern;
+    if (g.mode === 'strip') {
+      const ox = g.lockX ? (+g.pattern.ox || 0) - stripCum(g).get(s.id) - g.members.indexOf(s.id) * cornerAllow() : (+s.pattern.ox || 0);
+      const oy = g.lockY !== false ? (+g.pattern.oy || 0) : (+s.pattern.oy || 0);
+      pattern = { ...g.pattern, ox, oy };
+    } else pattern = { ...g.pattern, ox: (+g.pattern.ox || 0) - pl.x, oy: (+g.pattern.oy || 0) - pl.y };
     return { ...s, pattern };
   }
   function geoSettings(s) {
     const g = S.settings;
     return { sliver: s.settings.sliver !== '' && s.settings.sliver != null ? +s.settings.sliver : +g.sliver, kerf: +g.kerf, minOffcut: +g.minOffcut, reuseOffcuts: s.settings.reuseOffcuts !== false };
   }
+  /* all areas in a group are worked out together so offcuts are shared (round corners, across joined floors) */
+  function calcGroup(g) {
+    const mem = g.members.map(id => findSurface(id).surface).filter(Boolean);
+    const effs = mem.map(eff);
+    const key = JSON.stringify([effs.map(e => [e.outline, e.openings, e.doorways, e.pattern, e.settings, e.name]), mem.map(m => [tileOf(m), borderTileOf(m), geoSettings(m)]), S.settings.mat]);
+    const hit = S.cache.get('grp:' + g.id); if (hit && hit.key === key) return;
+    const rs = mem.map((m, i) => { const tile = tileOf(m); let res = null; if (tile) { try { res = Geo.layout(effs[i], tile, geoSettings(m), { borderTile: borderTileOf(m) }); } catch (err) { console.error(err); } } if (res) res.name = m.name; return { m, e: effs[i], tile, res }; });
+    const rl = rs.filter(r => r.res).map(r => r.res);
+    if (rl.length > 1) Geo.poolTiles(rl, geoSettings(mem[0]));
+    rs.forEach(r => S.cache.set(r.m.id, { key: 'g:' + key, val: { surface: r.e, tile: r.tile, res: r.res, mat: r.res ? Geo.materials(r.e, r.tile, r.res, S.settings.mat) : null, cuts: r.res ? Geo.cutList(r.res) : [], ref: r.res ? Geo.setoutRef(r.e, r.tile) : null, pooled: rl.length > 1 } }));
+    S.cache.set('grp:' + g.id, { key });
+  }
   function calc(s) {
+    const grp = groupOf(s); if (grp) { calcGroup(grp); return S.cache.get(s.id)?.val || {}; }
     const tile = tileOf(s); if (!tile) return {};
     const e = eff(s); const gs = geoSettings(s); const bt = borderTileOf(s);
     const key = JSON.stringify([e.outline, e.openings, e.doorways, e.pattern, e.settings, tile, bt, gs, S.settings.mat]);
@@ -123,6 +149,11 @@
   // ---------- views (one area, or a combined view) ----------
   function curView() {
     if (!S.job || !S.viewId) return null;
+    if (S.viewId.startsWith('fold-')) {
+      const f = findSurface(S.viewId.slice(5)); if (!f.surface) return null;
+      const walls = allSurfaces().filter(x => x.surface.kind === 'wall' && x.surface.link && x.surface.link.floorId === f.surface.id && x.surface.link.edge < f.surface.outline.length);
+      return { group: null, members: [f, ...walls], mode: 'folded', floor: f.surface };
+    }
     const g = getGroup(S.viewId);
     if (g) {
       const members = g.members.map(id => findSurface(id)).filter(x => x.surface);
@@ -135,16 +166,31 @@
     const m = new Map();
     if (v.mode === 'strip') { let x = 0; v.members.forEach(({ surface }) => { const b = Geo.bbox(surface.outline); m.set(surface.id, [x - b.x0, 0]); x += b.w + STRIP_GAP; }); }
     else if (v.mode === 'plan') v.members.forEach(({ surface }) => m.set(surface.id, [surface.place?.x || 0, surface.place?.y || 0]));
+    else if (v.mode === 'folded') v.members.forEach(({ surface }) => { if (surface === v.floor) m.set(surface.id, [0, 0]); else { const o = v.floor.outline; m.set(surface.id, o[(surface.link.edge + 1) % o.length].slice()); } });
     else v.members.forEach(({ surface }) => m.set(surface.id, [0, 0]));
     return m;
   }
+  /* rotation of each area in the view (folded-out walls lie flat round their floor) */
+  function rots(v) {
+    const m = new Map();
+    v.members.forEach(({ surface }) => {
+      let r = 0;
+      if (v.mode === 'folded' && surface !== v.floor) { const o = v.floor.outline, i = surface.link.edge; const A = o[i], B = o[(i + 1) % o.length]; r = Math.atan2(-(B[1] - A[1]), -(B[0] - A[0])); }
+      m.set(surface.id, r);
+    });
+    return m;
+  }
+  function toLocal(v, s, w) { const o = offsets(v).get(s.id), r = rots(v).get(s.id) || 0; return Geo.rot([w[0] - o[0], w[1] - o[1]], -r); }
+  function toWorld(v, s, p) { const o = offsets(v).get(s.id), r = rots(v).get(s.id) || 0; const q = Geo.rot(p, r); return [q[0] + o[0], q[1] + o[1]]; }
   function cur() { const v = curView(); if (!v) return {}; return v.members.find(m => m.surface.id === S.selId) || v.members[0] || {}; }
   function patternTarget(s) { const g = groupOf(s); return g || s; }
 
   // ---------- files ----------
+  // iPhone/iPad home-screen apps can't save downloads, so they use the share sheet (Save to Files). Everything else downloads.
+  const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
   async function shareOrDownload(blob, name) {
     const file = new File([blob], name, { type: blob.type });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    if (isIOS && navigator.canShare && navigator.canShare({ files: [file] })) {
       try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e.name === 'AbortError') return; }
     }
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click();
@@ -187,11 +233,11 @@
   async function route() {
     const h = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
     if (h[0] === 'job') {
-      if (!S.job || S.job.id !== h[1]) { S.job = await Store.get(h[1]); S.cache.clear(); S.view = null; S.undo = []; S.redo = []; }
+      if (!S.job || S.job.id !== h[1]) { S.job = await Store.get(h[1]); S.cache.clear(); S.view = null; S.undo = []; S.redo = []; resetSigs(); }
       if (!S.job) { location.hash = ''; return; }
       if ((h[2] === 'v' || h[2] === 's') && h[3]) {
         let vid = h[3], sel = h[4] || null;
-        const f = findSurface(vid);
+        const f = vid.startsWith('fold-') ? {} : findSurface(vid);
         if (f.surface) { const g = groupOf(f.surface); if (g) { location.replace(`#/job/${S.job.id}/v/${g.id}/${vid}`); return; } sel = vid; }
         if (S.viewId !== vid) { S.viewId = vid; S.view = null; S.best = null; S.selOpening = -1; S.trace = S.calib = S.opTrace = null; S.mode = 'move'; }
         const v = curView(); if (!v) { location.hash = `#/job/${S.job.id}`; return; }
@@ -214,7 +260,7 @@
     app.innerHTML = `
       <div class="top"><div class="brand">NAOS <span>FLOORS</span></div><h1 style="font-weight:400;opacity:.85">Tile Set-out</h1><span class="netslot">${netPill()}</span><button data-a="settings" aria-label="Settings">⚙︎</button></div>
       <div class="scroll"><div class="wrap">
-        <div class="card"><h2>Jobs<span class="sp"></span><button class="btn sec sm" data-a="import">Open job file</button><button class="btn sm" data-a="new">+ New job</button></h2>
+        <div class="card"><h2>Jobs<span class="sp"></span><button class="btn sec sm" data-a="import">Open job file</button><button class="btn sec sm" data-a="pastejob">Paste job</button><button class="btn sm" data-a="new">+ New job</button></h2>
           <div class="list">${jobs.length ? jobs.map(j => `<div class="item click" data-open="${j.id}"><div class="main"><div class="t">${esc(j.name)}</div><div class="s">${esc(j.client || '')}${j.client ? ' · ' : ''}${j.rooms.length} room${j.rooms.length === 1 ? '' : 's'} · ${j.rooms.reduce((a, r) => a + r.surfaces.length, 0)} areas · ${new Date(j.updated).toLocaleDateString('en-GB')}</div></div><span class="muted">›</span></div>`).join('') : '<div class="empty">No jobs yet.<br>Tap <b>+ New job</b> to start, or open a job file.</div>'}</div>
         </div>
         <div class="note">Everything is saved on this device and works with no signal. To move a job between phone and computer, use <b>Save job file</b> on the job and open it on the other device.</div>
@@ -225,13 +271,18 @@
       if (a === 'settings') location.hash = '#/settings';
       if (a === 'new') { const name = prompt('Job name', 'New job'); if (name == null) return; const j = Store.newJob(name || 'New job'); await Store.put(j); location.hash = `#/job/${j.id}`; }
       if (a === 'import') importJobFile();
+      if (a === 'pastejob') { const m = modal(`<h3>Paste a job</h3><div class="muted">On the other device open the job and tap <b>Copy job</b>, then paste it here.</div><textarea class="code" id="pjob" placeholder='{"app":"naos-tile-setout",...}'></textarea><div class="row"><button class="btn" data-m="go">Open job</button><button class="btn sec" data-close>Cancel</button></div>`); m.querySelector('[data-m="go"]').onclick = () => { const t = $('#pjob', m).value; m.remove(); importJobText(t); }; }
     };
     app.oninput = null;
   }
   async function importJobFile() {
-    const f = await pickFile('.json,.tso,application/json'); if (!f) return;
+    const f = await pickFile(''); if (!f) return;
+    importJobText(await f.text());
+  }
+  async function importJobText(text) {
     try {
-      const j = JSON.parse(await f.text()); let job = j.job || j;
+      const st = text.indexOf('{'); if (st < 0) throw new Error('No job found in that text');
+      const j = JSON.parse(text.slice(st, text.lastIndexOf('}') + 1)); let job = j.job || j;
       if (!job.rooms || !job.tiles) throw new Error('Not a tile set-out job file');
       job = Store.migrate(job);
       const existing = await Store.get(job.id);
@@ -258,7 +309,7 @@
         <div class="card"><h2>Automatic drawing reading (optional)</h2>
           <div class="grid">${f('apiKey', 'Anthropic API key', 'password', 'g', 'autocomplete="off" placeholder="sk-ant-…"')}${f('model', 'Model', 'text', 'g')}</div>
           <div class="note">Only needed for the in-app <b>Read drawing</b> button, which only works with signal. The key is stored on this device only. Without a key you can send a drawing to Claude with the ready-made prompt and paste the reply in.</div></div>
-        <div class="note">Version 1.1 · Naos Floors internal tool. Quantities are a guide: always check on site and follow BS 5385 and manufacturers’ instructions.</div>
+        <div class="note">Version 1.2 · Naos Floors internal tool. Quantities are a guide: always check on site and follow BS 5385 and manufacturers’ instructions.</div>
       </div></div>`;
     app.onclick = e => { if (e.target.closest('[data-a="back"]')) history.length > 1 ? history.back() : location.hash = ''; };
     app.oninput = e => {
@@ -291,13 +342,13 @@
         </div></details>
         ${!job.rooms.length ? `<div class="card" style="border:2px dashed var(--bronze)"><h2>Start setting out</h2><div class="muted" style="margin-bottom:10px">Add the rooms for this job. A quick room gives you 4 walls (opened together) and a floor in one go.</div>
           <div class="row"><button class="btn" data-a="quickroom">+ Quick room</button><button class="btn sec" data-a="addroom">+ Empty room</button><button class="btn sec" data-a="paste">Paste room data</button></div></div>` : ''}
-        ${job.groups.length ? `<div class="card"><h2>Combined views</h2><div class="list">${job.groups.map(g => `<div class="item click" data-group="${g.id}"><div class="main"><div class="t">${esc(g.name)} <span class="pill" style="background:#E7EEF9;color:#1D4ED8">${g.mode === 'strip' ? 'walls unfolded' : 'floors joined'}</span></div><div class="s">${g.members.map(id => esc(findSurface(id).surface?.name || '?')).join(' · ')}</div></div><button class="btn sec sm" data-gmenu="${g.id}" aria-label="More">⋯</button></div>`).join('')}</div></div>` : ''}
+        ${(() => { const folds = allSurfaces().filter(x => x.surface.kind === 'floor' && allSurfaces().some(y => y.surface.link?.floorId === x.surface.id)); return job.groups.length || folds.length ? `<div class="card"><h2>Combined views</h2><div class="list">${folds.map(x => `<div class="item click" data-group="fold-${x.surface.id}"><div class="main"><div class="t">${esc(x.room.name)} — ${esc(x.surface.name)} <span class="pill" style="background:#E3F2E6;color:#15803D">folded out</span></div><div class="s">Floor with its walls laid flat round it</div></div><span class="muted">›</span></div>`).join('')}${job.groups.map(g => `<div class="item click" data-group="${g.id}"><div class="main"><div class="t">${esc(g.name)} <span class="pill" style="background:#E7EEF9;color:#1D4ED8">${g.mode === 'strip' ? 'walls unfolded' : 'floors joined'}</span></div><div class="s">${g.members.map(id => esc(findSurface(id).surface?.name || '?')).join(' · ')}</div></div><button class="btn sec sm" data-gmenu="${g.id}" aria-label="More">⋯</button></div>`).join('')}</div></div>` : ''; })()}
         ${job.rooms.map(r => `<div class="card"><h2>${esc(r.name)}<span class="sp"></span><button class="btn sec sm" data-rmenu="${r.id}" aria-label="Room options">⋯</button></h2>
           <div class="list">${r.surfaces.map(s => surfRow(r, s)).join('') || '<div class="muted">No areas yet — add a wall or floor.</div>'}</div>
           <div class="row" style="margin-top:8px"><button class="btn sec sm" data-add="wall" data-room="${r.id}">+ Wall</button><button class="btn sec sm" data-add="floor" data-room="${r.id}">+ Floor</button></div></div>`).join('')}
         ${job.rooms.length ? `<div class="row" style="margin-bottom:12px"><button class="btn" data-a="addroom">+ Room</button><button class="btn sec" data-a="quickroom">+ Quick room (4 walls + floor)</button><button class="btn sec" data-a="combine">⧉ Combine areas</button></div>` : ''}
         <div class="card"><h2>Tiles on this job<span class="sp"></span><button class="btn sec sm" data-a="addtile">+ Tile</button></h2>
-          <div class="list">${job.tiles.map(t => `<div class="item click" data-tile="${t.id}"><div class="main"><div class="t">${esc(t.name)}</div><div class="s">${t.w} × ${t.h} × ${t.thick} mm · ${+t.perBox ? t.perBox + ' per box' : +t.m2PerBox ? t.m2PerBox + ' m² per box' : '<span style="color:var(--red)">box size not set</span>'}</div></div><span class="muted">Edit ›</span></div>`).join('')}</div></div>
+          <div class="list">${!job.tiles.length ? '<div class="muted">No tiles yet. Tap <b>+ Tile</b> to pick a size.</div>' : ''}${job.tiles.map(t => `<div class="item click" data-tile="${t.id}"><div class="main"><div class="t">${esc(t.name)}</div><div class="s">${t.w} × ${t.h} × ${t.thick} mm · ${+t.perBox ? t.perBox + ' per box' : +t.m2PerBox ? t.m2PerBox + ' m² per box' : '<span style="color:var(--red)">box size not set</span>'}</div></div><span class="muted">Edit ›</span></div>`).join('')}</div></div>
         <div class="card"><h2>Order list — whole job</h2>
           <table class="t"><tr><th>Item</th><th>Quantity</th><th class="n">Order</th></tr>${tot.rows.map(r => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td class="n"><b>${esc(r[2])}</b></td></tr>`).join('')}</table></div>
         <div class="card"><h2>Drawings → rooms</h2>
@@ -306,7 +357,7 @@
           <button class="btn sec" data-a="paste">Paste room data</button><button class="btn sec" data-a="prompt">Copy prompt for Claude</button></div>
           ${!navigator.onLine ? '<div class="note">Offline: automatic reading is switched off. You can still trace a drawing by hand in any area (Drawing tab).</div>' : !S.settings.apiKey ? '<div class="note">Automatic reading needs an API key in Settings. Or tap <b>Copy prompt for Claude</b>, send it to Claude with your drawing, then paste the reply here with <b>Paste room data</b>.</div>' : ''}
         </div>
-        <div class="row" style="margin-bottom:20px"><button class="btn sec" data-a="savefile">Save job file</button><button class="btn danger" data-a="deljob">Delete job</button></div>
+        <div class="row" style="margin-bottom:20px"><button class="btn sec" data-a="savefile">Save job file</button><button class="btn sec" data-a="copyjob">Copy job</button><button class="btn danger" data-a="deljob">Delete job</button></div>
       </div></div>`;
     app.oninput = e => { const k = e.target.dataset.j; if (k) { job[k] = e.target.value; save(); if (k === 'name') $('.top h1').textContent = job.name; } };
     app.onclick = async e => {
@@ -318,16 +369,27 @@
       const sv = t.closest('[data-surf]'); if (sv) return openView(sv.dataset.surf);
       const tl = t.closest('[data-tile]'); if (tl) return tileModal(tl.dataset.tile);
       const ad = t.closest('[data-add]');
-      if (ad) { const room = job.rooms.find(r => r.id === ad.dataset.room); const kind = ad.dataset.add; const n = room.surfaces.filter(s => s.kind === kind).length; const s = Store.newSurface(kind, { name: kind === 'wall' ? `Wall ${String.fromCharCode(65 + n)}` : (n ? `Floor ${n + 1}` : 'Floor'), tileId: job.tiles[0]?.id }); autoStart(s); room.surfaces.push(s); await Store.put(job); openView(s.id); return; }
+      if (ad) { const room = job.rooms.find(r => r.id === ad.dataset.room); const kind = ad.dataset.add; const n = room.surfaces.filter(s => s.kind === kind).length; const s = Store.newSurface(kind, { name: kind === 'wall' ? `Wall ${String.fromCharCode(65 + n)}` : (n ? `Floor ${n + 1}` : 'Floor'), tileId: (job.tiles[0]?.id || null) }); autoStart(s); room.surfaces.push(s); await Store.put(job); openView(s.id); return; }
       const a = t.closest('[data-a]')?.dataset.a; if (!a) return;
       if (a === 'home') location.hash = '';
       if (a === 'undo') undo(); if (a === 'redo') redo();
       if (a === 'addroom') { const n = prompt('Room or area name', 'Room'); if (!n) return; job.rooms.push(Store.newRoom(n)); save(); renderJob(); }
       if (a === 'quickroom') quickRoomModal();
       if (a === 'combine') combineModal();
-      if (a === 'addtile') { const tile = Store.newTile({ name: 'New tile' }); job.tiles.push(tile); save(); tileModal(tile.id, true); }
+      if (a === 'addtile') addTileModal();
       if (a === 'export') exportModal(null);
-      if (a === 'savefile') { await Store.put(job); shareOrDownload(new Blob([JSON.stringify({ app: 'naos-tile-setout', v: 2, job })], { type: 'application/json' }), `${safeName(job.name)}.tso.json`); }
+      if (a === 'copyjob') {
+        const hasImg = Object.keys(job.images || {}).length;
+        const m = modal(`<h3>Copy job</h3><div class="muted">Copies the whole job as text. On the other device tap <b>Paste job</b> on the jobs screen.</div>${hasImg ? '<label class="chk"><input type="checkbox" id="cjImg"> Include imported drawings (makes it much bigger)</label>' : ''}<div class="row" style="margin-top:8px"><button class="btn" data-m="go">Copy</button><button class="btn sec" data-close>Cancel</button></div>`);
+        m.querySelector('[data-m="go"]').onclick = async () => {
+          const withImg = $('#cjImg', m)?.checked; const j2 = JSON.parse(JSON.stringify(job)); if (!withImg) { j2.images = {}; allSurfacesOf(j2).forEach(s => { s.bg = null; }); }
+          const txt = JSON.stringify({ app: 'naos-tile-setout', v: 3, job: j2 });
+          try { await navigator.clipboard.writeText(txt); toast('Job copied — paste it on the other device'); m.remove(); }
+          catch (e) { m.querySelector('.box').insertAdjacentHTML('beforeend', `<div class="note">Couldn't copy automatically. Select all of this and copy it:</div><textarea class="code" readonly>${esc(txt)}</textarea>`); }
+        };
+        return;
+      }
+      if (a === 'savefile') { await Store.put(job); shareOrDownload(new Blob([JSON.stringify({ app: 'naos-tile-setout', v: 3, job })], { type: 'application/json' }), `${safeName(job.name)}.json`); }
       if (a === 'deljob') { if (confirm(`Delete "${job.name}" from this device?\nSave a job file first if you want a copy.`)) { await Store.del(job.id); S.job = null; location.hash = ''; } }
       if (a === 'paste') pasteModal(null);
       if (a === 'prompt') copyPrompt();
@@ -417,6 +479,33 @@
       if (g.needsArrange) setTimeout(() => toast('Use ⇄ Arrange to drag the areas together — they snap edge to edge', 5000), 400);
     };
   }
+  const PRESETS = [
+    ['Square', [[300, 300], [450, 450], [600, 600], [750, 750], [800, 800], [900, 900], [1000, 1000], [1200, 1200]]],
+    ['Rectangle', [[600, 300], [900, 450], [1200, 600], [1600, 800], [1200, 300], [2400, 1200], [3200, 1600]]],
+    ['Plank / wood effect', [[900, 150], [1200, 200], [1200, 300], [1500, 250], [1800, 300], [2000, 200]]],
+    ['Herringbone / chevron', [[280, 70], [450, 90], [600, 120], [600, 150], [750, 150]]],
+    ['Wall / metro', [[100, 100], [150, 150], [200, 200], [150, 75], [200, 100], [300, 100], [300, 75], [200, 65], [250, 60]]],
+    ['Natural stone', [[610, 406], [610, 305], [600, 400], [400, 400], [800, 400]]],
+  ];
+  /* pick a tile: preset sizes or custom; cb(tile) */
+  function addTileModal(cb) {
+    const m = modal(`<h3>Add a tile</h3><div class="muted">Tap a common size, or enter your own. You can change everything afterwards.</div>
+      ${PRESETS.map(([g, list]) => `<div style="margin-top:10px"><div class="muted" style="font-weight:600">${g}</div><div class="row" style="gap:6px;margin-top:4px">${list.map(([w, h]) => `<button class="btn sm sec" data-ps="${w}x${h}">${w}×${h}</button>`).join('')}</div></div>`).join('')}
+      <div class="row" style="margin-top:14px"><button class="btn" data-ps="custom">Custom size</button><button class="btn sec" data-close>Cancel</button></div>`);
+    m.addEventListener('click', e => {
+      const b = e.target.closest('[data-ps]'); if (!b) return;
+      checkpoint();
+      let t;
+      if (b.dataset.ps === 'custom') t = Store.newTile({ name: 'New tile', w: '', h: '', thick: 10, perBox: '' });
+      else { const [w, h] = b.dataset.ps.split('x').map(Number); const slab = w * h >= 1600 * 800; t = Store.newTile({ name: `${w}×${h}`, w, h, thick: slab ? 6 : (w <= 300 && h <= 300 ? 8 : 10), perBox: '' }); }
+      S.job.tiles.push(t);
+      // areas that have no tile yet get this one
+      allSurfaces().forEach(({ surface }) => { if (!surface.tileId || !S.job.tiles.some(x => x.id === surface.tileId)) surface.tileId = t.id; });
+      S.job.groups.forEach(g => { if (!g.tileId || !S.job.tiles.some(x => x.id === g.tileId)) g.tileId = t.id; });
+      S.cache.clear(); save(); m.remove(); cb && cb(t);
+      tileModal(t.id, true);
+    });
+  }
   function tileFields(t) {
     const f = (k, l, type = 'number', ph = '') => `<label class="f">${l}<input data-t="${k}" type="${type}" ${type === 'number' ? 'inputmode="decimal" step="any"' : ''} value="${esc(t[k])}" placeholder="${ph}"></label>`;
     return `<div class="grid">${f('name', 'Name', 'text')}${f('w', 'Size 1 (across) mm')}${f('h', 'Size 2 (up) mm')}${f('thick', 'Thickness mm')}${f('perBox', 'Tiles per box')}${f('m2PerBox', 'or m² per box')}${f('adhCoverage', 'Adhesive m²/bag', 'number', 'default')}</div>`;
@@ -431,7 +520,7 @@
     m.addEventListener('click', e => {
       if (e.target.closest('[data-m="del"]')) {
         if (used && !confirm(`This tile is used on ${used} areas. They will switch to the first tile. Delete?`)) return;
-        S.job.tiles.splice(S.job.tiles.indexOf(t), 1); const t0 = S.job.tiles[0].id;
+        S.job.tiles.splice(S.job.tiles.indexOf(t), 1); const t0 = (S.job.tiles[0]?.id || null);
         allSurfaces().forEach(({ surface }) => { if (surface.tileId === id) surface.tileId = t0; if (surface.settings.border?.tileId === id) surface.settings.border.tileId = t0; });
         S.job.groups.forEach(g => { if (g.tileId === id) g.tileId = t0; }); save(); m.remove();
       }
@@ -446,10 +535,10 @@
       <div class="row"><button class="btn" data-m="go">Create</button><button class="btn sec" data-close>Cancel</button></div>`);
     m.querySelector('[data-m="go"]').onclick = () => {
       const L = +$('#qL', m).value, W = +$('#qW', m).value, H = +$('#qH', m).value; if (!(L > 0 && W > 0)) return toast('Enter the room size');
-      const room = Store.newRoom($('#qName', m).value || 'Room'); const tid = S.job.tiles[0].id;
+      const room = Store.newRoom($('#qName', m).value || 'Room'); const tid = (S.job.tiles[0]?.id || null);
       const walls = [];
       if ($('#qWalls', m).checked) [['A', L], ['B', W], ['C', L], ['D', W]].forEach(([n, len]) => { const s = Store.newSurface('wall', { name: `Wall ${n}`, outline: [[0, 0], [len, 0], [len, H], [0, H]], tileId: tid }); room.surfaces.push(s); walls.push(s); });
-      if ($('#qFloor', m).checked) room.surfaces.push(Store.newSurface('floor', { name: 'Floor', outline: [[0, 0], [L, 0], [L, W], [0, W]], tileId: tid }));
+      if ($('#qFloor', m).checked) { const fl = Store.newSurface('floor', { name: 'Floor', outline: [[0, 0], [L, 0], [L, W], [0, W]], tileId: tid }); room.surfaces.push(fl); walls.forEach((w, i) => { w.link = { floorId: fl.id, edge: i }; }); }
       room.surfaces.forEach(autoStart);
       S.job.rooms.push(room);
       if (walls.length > 1) { const g = makeGroup(`${room.name} — walls`, 'strip', walls); autoStartGroup(g); }
@@ -466,7 +555,7 @@
     m.querySelector('[data-m="go"]').onclick = () => { try { const d = AI.extractJSON($('#pj', m).value); m.remove(); previewImport(d, targetSurface); } catch (e) { toast('Could not read that: ' + e.message, 4000); } };
   }
   function previewImport(data, targetSurface) {
-    let out; try { out = AI.toRooms(data, S.job.tiles[0].id); } catch (e) { return toast(e.message, 4000); }
+    let out; try { out = AI.toRooms(data, (S.job.tiles[0]?.id || null)); } catch (e) { return toast(e.message, 4000); }
     const list = out.rooms.map(r => `<div><b>${esc(r.name)}</b><ul style="margin:4px 0 8px;padding-left:18px">${r.surfaces.map(s => { const b = Geo.bbox(s.outline); const units = s.openings.filter(o => o.tiled).length; return `<li>${esc(s.name)} (${s.kind}) ${Math.round(b.w)} × ${Math.round(b.h)} mm · ${s.openings.length - units} openings${units ? ` · ${units} units tiled under` : ''}${s.doorways.length ? ` · ${s.doorways.length} doorway${s.doorways.length > 1 ? 's' : ''}` : ''}</li>`; }).join('')}</ul></div>`).join('');
     const floors = out.rooms.flatMap(r => r.surfaces.filter(s => s.kind === 'floor'));
     const first = out.rooms[0]?.surfaces[0];
@@ -496,18 +585,110 @@
     if (groupOf(surface)) return;
     try { const b = Geo.findBestStarts(surface, tileOf(surface), geoSettings(surface), 1)[0]; if (b) { surface.pattern.ox = Math.round(b.ox * 10) / 10; surface.pattern.oy = Math.round(b.oy * 10) / 10; surface.startLabel = b.label; } } catch (e) { console.warn(e); }
   }
-  function groupItems(g, members) {
-    const v = { mode: g.mode, members: members || g.members.map(id => findSurface(id)).filter(x => x.surface) };
-    const off = offsets(v);
-    return v.members.map(({ surface }) => ({ surface: { ...surface, pattern: { ...g.pattern, ox: surface.pattern.ox, oy: g.pattern.oy } }, off: off.get(surface.id), real: surface }));
+  function groupItems(g) {
+    const mem = g.members.map(id => findSurface(id)).filter(x => x.surface);
+    const cum = g.mode === 'strip' ? stripCum(g) : null;
+    const off = offsets({ mode: g.mode, members: mem });
+    return mem.map(({ surface }, i) => ({
+      surface: { ...surface, pattern: { ...g.pattern, ox: surface.pattern.ox, oy: g.pattern.oy } },
+      off: g.mode === 'strip' && g.lockX ? [cum.get(surface.id) + i * cornerAllow(), 0] : off.get(surface.id), real: surface,
+    }));
   }
+  const r10 = v => Math.round(v * 10) / 10;
   function applyGroupBest(g, b) {
-    if (g.mode === 'strip') { const items = groupItems(g); b.walls.forEach((w, i) => { items[i].real.pattern.ox = Math.round(w.ox * 10) / 10; }); g.pattern.oy = Math.round(b.walls[0].oy * 10) / 10; }
-    else { g.pattern.ox = Math.round(b.ox * 10) / 10; g.pattern.oy = Math.round(b.oy * 10) / 10; }
+    const items = groupItems(g);
+    if (b.walls) { b.walls.forEach((w, i) => { const s = items[i].real; if (g.lockX) { /* not used */ } s.pattern.ox = r10(w.ox); if (g.lockY !== false) g.pattern.oy = r10(w.oy); else s.pattern.oy = r10(w.oy); }); }
+    else if (g.mode === 'strip') { g.pattern.ox = r10(b.ox); if (g.lockY !== false) g.pattern.oy = r10(b.oy); else items.forEach(it => { it.real.pattern.oy = r10(b.oy); }); }
+    else { g.pattern.ox = r10(b.ox); g.pattern.oy = r10(b.oy); }
     g.startLabel = b.label; S.cache.clear();
   }
-  function autoStartGroup(g) {
-    try { const items = groupItems(g); const t = tileById(g.tileId); const b = Geo.bestForSet(items, t, geoSettings(items[0].real), g.mode, 1)[0]; if (b) applyGroupBest(g, b); } catch (e) { console.warn(e); }
+  function bestForGroup(g, top) {
+    const items = groupItems(g); const t = tileOf(items[0].real); if (!t) return [];
+    const gs = geoSettings(items[0].real);
+    if (g.mode === 'strip' && g.lockX) return Geo.bestForSet(items, t, gs, 'plan', top);
+    if (g.mode === 'strip' && g.lockY === false) { // each wall on its own
+      const walls = items.map(it => { const b = Geo.findBestStarts({ ...it.real, pattern: eff(it.real).pattern }, tileOf(it.real), geoSettings(it.real), 1)[0]; return b ? { ox: b.ox, oy: b.oy, stats: b.stats } : null; });
+      if (walls.some(w => !w)) return [];
+      const st = walls.reduce((a, w) => ({ slivers: a.slivers + w.stats.slivers, needed: a.needed + w.stats.needed, cuts: a.cuts + w.stats.cuts, minCut: Math.min(a.minCut, w.stats.minCut ?? Infinity) }), { slivers: 0, needed: 0, cuts: 0, minCut: Infinity });
+      if (!isFinite(st.minCut)) st.minCut = null;
+      return [{ label: 'Best for each wall on its own', walls, stats: st }];
+    }
+    if (g.tileMode === 'separate' && g.mode === 'strip') return Geo.bestForSet(items.filter(it => tileOf(it.real)?.id === t.id), t, gs, g.mode, top);
+    return Geo.bestForSet(items, t, gs, g.mode, top);
+  }
+  function autoStartGroup(g) { try { const b = bestForGroup(g, 1)[0]; if (b) applyGroupBest(g, b); } catch (e) { console.warn(e); } }
+
+  // ---------- walls linked to floor sides ----------
+  function edgeLen(f, i) { const o = f.outline, A = o[i], B = o[(i + 1) % o.length]; return A && B ? Math.hypot(B[0] - A[0], B[1] - A[1]) : 0; }
+  function bottomEdge(w) { const o = w.outline, y0 = Math.min(...o.map(p => p[1])); let bi = -1, bl = 0; o.forEach((p, i) => { const q = o[(i + 1) % o.length]; if (Math.abs(p[1] - y0) < 0.5 && Math.abs(q[1] - y0) < 0.5) { const l = Math.abs(q[0] - p[0]); if (l > bl) { bl = l; bi = i; } } }); return bi; }
+  const sigOf = s => JSON.stringify([s.outline, s.link || null, (s.openings || []).filter(o => o.type === 'door').map(o => [o.id, o.x, o.w])]);
+  function resetSigs() { S.sigs = new Map(); S.prevOutlines = new Map(); if (S.job) allSurfaces().forEach(({ surface }) => { S.sigs.set(surface.id, sigOf(surface)); S.prevOutlines.set(surface.id, JSON.parse(JSON.stringify(surface.outline))); }); }
+  /* after a floor's shape is replaced, keep each wall on the matching side (same direction, nearest) */
+  function remapDoorways(f, old, mapPt = q => q) {
+    (f.doorways || []).forEach(d => {
+      const pts = Geo.doorwayPts({ outline: old }, d); if (!pts) return;
+      const m = Geo.pointToDoorway(f.outline, mapPt(pts[0]), mapPt(pts[1])); if (m) { d.edge = m.edge; d.pos = m.pos; d.w = m.w || d.w; }
+    });
+  }
+  function remapLinks(f, old) {
+    remapDoorways(f, old);
+    const walls = allSurfaces().map(x => x.surface).filter(w => w.kind === 'wall' && w.link && w.link.floorId === f.id);
+    const o = f.outline;
+    walls.forEach(w => {
+      const A = old[w.link.edge], B = old[(w.link.edge + 1) % old.length]; if (!A || !B) return;
+      const L = Math.hypot(B[0] - A[0], B[1] - A[1]) || 1; const u = [(B[0] - A[0]) / L, (B[1] - A[1]) / L]; const m = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
+      let best = -1, bd = Infinity;
+      o.forEach((P, i) => { const Q = o[(i + 1) % o.length]; const l = Math.hypot(Q[0] - P[0], Q[1] - P[1]); if (l < 1) return; const dot = ((Q[0] - P[0]) * u[0] + (Q[1] - P[1]) * u[1]) / l; if (dot < 0.99) return; const d = Math.hypot((P[0] + Q[0]) / 2 - m[0], (P[1] + Q[1]) / 2 - m[1]); if (d < bd) { bd = d; best = i; } });
+      if (best >= 0) w.link.edge = best; else delete w.link;
+    });
+  }
+  /* keep walls and the floor they stand on the same length; wall doors become floor doorways */
+  function syncLinks() {
+    if (!S.job || !S.sigs) return false;
+    const surfs = allSurfaces().map(x => x.surface);
+    const changed = surfs.filter(s => S.sigs.has(s.id) && S.sigs.get(s.id) !== sigOf(s));
+    let did = false; const floors = new Set();
+    changed.filter(s => s.kind === 'wall' && s.link).forEach(w => {
+      const f = findSurface(w.link.floorId).surface; if (!f || w.link.edge >= f.outline.length) return;
+      const L = edgeLen(f, w.link.edge), W = Geo.bbox(w.outline).w;
+      if (Math.abs(L - W) > 0.5) { Geo.stretchEdge(f, w.link.edge, W); did = true; floors.add(f.id); }
+      if (syncDoors(w, f)) did = true;
+    });
+    changed.filter(s => s.kind === 'floor').forEach(f => {
+      const old = S.prevOutlines && S.prevOutlines.get(f.id);
+      if (old && old.length !== f.outline.length) { remapLinks(f, old); did = true; }
+      floors.add(f.id);
+    });
+    floors.forEach(fid => {
+      const f = findSurface(fid).surface; if (!f) return;
+      surfs.filter(w => w.kind === 'wall' && w.link && w.link.floorId === fid && !changed.includes(w) && w.link.edge < f.outline.length).forEach(w => {
+        const L = edgeLen(f, w.link.edge), W = Geo.bbox(w.outline).w;
+        if (Math.abs(L - W) > 0.5) { const bi = bottomEdge(w); if (bi >= 0) { Geo.stretchEdge(w, bi, edgeLen(w, bi) + (L - W)); did = true; } }
+        if (syncDoors(w, f)) did = true;
+      });
+    });
+    surfs.forEach(s => { S.sigs.set(s.id, sigOf(s)); S.prevOutlines.set(s.id, JSON.parse(JSON.stringify(s.outline))); });
+    if (did) S.cache.clear();
+    return did;
+  }
+  function syncDoors(w, f) {
+    let did = false; const L = edgeLen(f, w.link.edge); f.doorways = f.doorways || [];
+    const doors = (w.openings || []).filter(o => o.type === 'door');
+    doors.forEach(o => {
+      const pos = Math.round(L - (+o.x + +o.w)); let d = f.doorways.find(x => x.fromOp === o.id);
+      if (!d) { d = { id: Store.uid(), name: `${o.name || 'Door'} (${w.name})`, edge: w.link.edge, pos, w: +o.w, fromOp: o.id, fromWall: w.id }; f.doorways.push(d); did = true; }
+      else if (d.pos !== pos || d.w !== +o.w || d.edge !== w.link.edge) { d.pos = pos; d.w = +o.w; d.edge = w.link.edge; did = true; }
+    });
+    const before = f.doorways.length;
+    f.doorways = f.doorways.filter(d => d.fromWall !== w.id || doors.some(o => o.id === d.fromOp));
+    return did || before !== f.doorways.length;
+  }
+  function linkWall(w, floorId, edge) {
+    if (!floorId) { delete w.link; return; }
+    w.link = { floorId, edge: +edge };
+    const f = findSurface(floorId).surface; const L = edgeLen(f, +edge), W = Geo.bbox(w.outline).w;
+    if (Math.abs(L - W) > 0.5) { const bi = bottomEdge(w); if (bi >= 0) Geo.stretchEdge(w, bi, edgeLen(w, bi) + (L - W)); }
+    syncDoors(w, f); resetSigs(); S.cache.clear();
   }
 
   // ---------- export ----------
@@ -575,14 +756,15 @@
 
   function renderEditor() {
     const v = curView(); const { room, surface } = cur(); if (!surface) { location.hash = `#/job/${S.job.id}`; return; }
-    const title = v.group ? esc(v.group.name) : `${esc(room.name)} — ${esc(surface.name)}`;
+    const title = v.mode === 'folded' ? `${esc(v.floor.name)} — folded out` : v.group ? esc(v.group.name) : `${esc(room.name)} — ${esc(surface.name)}`;
+    const canFold = v.mode !== 'folded' && v.members.some(({ surface: m }) => (m.kind === 'wall' && m.link) || (m.kind === 'floor' && allSurfaces().some(x => x.surface.link?.floorId === m.id)));
     app.innerHTML = `
       <div class="top"><button data-a="back" aria-label="Back to job">‹</button><h1>${title}</h1><span class="netslot">${netPill()}</span><button data-a="export">Export</button></div>
       <div class="editor">
         <div class="cvwrap"><canvas id="cv"></canvas>
           <div class="tools">
-            <button data-mode="move" title="Drag to move the tiles">✥<span class="lbl"> Tiles</span></button><button data-mode="pan" title="Drag to move around">✋<span class="lbl"> Pan</span></button><button data-mode="edit" title="Drag corners and openings, tap a measurement to change it">✎<span class="lbl"> Shape</span></button>
-            ${v.mode === 'plan' ? '<button data-mode="arrange" title="Drag areas into place">⇄<span class="lbl"> Arrange</span></button>' : ''}
+            <button data-mode="move" title="Drag to move the tiles">✥<span class="lbl"> Tiles</span></button><button data-mode="pan" title="Drag to move around">✋<span class="lbl"> Pan</span></button>${v.mode !== 'folded' ? '<button data-mode="edit" title="Drag corners and openings, tap a measurement to change it">✎<span class="lbl"> Shape</span></button>' : ''}
+            ${v.mode === 'plan' ? '<button data-mode="arrange" title="Drag areas into place">⇄<span class="lbl"> Arrange</span></button>' : ''}${canFold ? '<button data-a="fold" title="See the floor with its walls folded out round it">▣<span class="lbl"> Fold out</span></button>' : ''}
             <span class="sp"></span><button data-noundo data-a="undo" title="Undo">↶</button><button data-noundo data-a="redo" title="Redo">↷</button><button data-a="fit" title="Fit to screen">⤢</button><button data-a="help" title="Help">?</button>
           </div>
           <div id="hint"></div>
@@ -605,6 +787,7 @@
       if (a === 'undo') undo(); if (a === 'redo') redo();
       if (a === 'export') exportModal('view');
       if (a === 'help') helpModal();
+      if (a === 'fold') { const sel = cur().surface; const fid = sel.kind === 'floor' ? sel.id : (sel.link?.floorId || v.members.map(m => m.surface).find(m => m.link)?.link.floorId); if (fid) openView('fold-' + fid, sel.id); }
     };
   }
   function helpModal() {
@@ -629,22 +812,22 @@
     return v.members.map(({ surface }, idx) => {
       const c = raw ? null : calc(surface);
       const e = eff(surface);
-      let rawT = null; if (raw) { const reg = Geo.surfaceRegion(e); if (reg) rawT = Geo.layTiles(reg, tileOf(surface), e.pattern, { limit: 20000 }).tiles; }
-      return { surface: e, real: surface, tile: tileOf(surface), res: c ? c.res : null, raw: rawT, off: off.get(surface.id), selected: surface.id === S.selId, bgImg: bgImgFor(surface), ref: c ? c.ref : null, dimmed: v.members.length > 1 && S.mode === 'edit' && surface.id !== S.selId, noSideDims: v.mode === 'strip' && idx > 0 && !(S.mode === 'edit' && surface.id === S.selId) };
+      let rawT = null; if (raw && tileOf(surface)) { const reg = Geo.surfaceRegion(e); if (reg) rawT = Geo.layTiles(reg, tileOf(surface), e.pattern, { limit: 20000 }).tiles; }
+      return { surface: e, real: surface, tile: tileOf(surface), res: c ? c.res : null, raw: rawT, off: off.get(surface.id), rot: rots(v).get(surface.id) || 0, selected: surface.id === S.selId, bgImg: bgImgFor(surface), ref: c ? c.ref : null, dimmed: v.members.length > 1 && S.mode === 'edit' && surface.id !== S.selId, noSideDims: v.mode === 'strip' && idx > 0 && !(S.mode === 'edit' && surface.id === S.selId) };
     });
   }
   function fitView() {
     const [W, H] = dims(); const items = sceneItems(true).map(i => ({ ...i, raw: null }));
     const pts = [];
-    items.forEach(it => { const b = Geo.bbox(it.surface.outline); pts.push([b.x0 + it.off[0], b.y0 + it.off[1]], [b.x1 + it.off[0], b.y1 + it.off[1]]); });
+    const bbAll = Render.itemsBBox(items); pts.push([bbAll.x0, bbAll.y0], [bbAll.x1, bbAll.y1]);
     const sel = items.find(i => i.selected);
     if (sel && sel.real.bg && (S.trace || S.calib)) { const img = bgImgFor(sel.real); if (img) { const b = sel.real.bg; pts.push([b.x + sel.off[0], b.y + sel.off[1]], [b.x + img.width * b.mmPerPx + sel.off[0], b.y - img.height * b.mmPerPx + sel.off[1]]); } }
     S.view = Render.makeView(Geo.bbox(pts), W, H, 54); S.view.cy += (items.length > 1 ? 26 : 16) / S.view.s;
   }
   function originPoints() {
-    const v = curView(); const off = offsets(v);
+    const v = curView();
     if (v.mode === 'plan') return [[+v.group.pattern.ox || 0, +v.group.pattern.oy || 0]];
-    return v.members.map(({ surface }) => { const e = eff(surface); const o = off.get(surface.id); return [(+e.pattern.ox || 0) + o[0], (+e.pattern.oy || 0) + o[1]]; });
+    return v.members.filter(({ surface }) => v.members.length === 1 || surface.id === S.selId).map(({ surface }) => { const e = eff(surface); return toWorld(v, surface, [+e.pattern.ox || 0, +e.pattern.oy || 0]); });
   }
   function drawEditor() {
     if (!cv || !S.viewId) return; const v = curView(); if (!v) return;
@@ -653,10 +836,11 @@
     ctx.setTransform(d, 0, 0, d, 0, 0);
     const items = sceneItems(S.dragging);
     S.dimHits = [];
-    Render.scene(ctx, W, H, S.view, items, { vertices: S.mode === 'edit', selVertex: S.selVertex, selOpening: S.selOpening, trace: S.trace, calib: S.calib || (S.opTrace && S.opTrace.length ? S.opTrace : null), ids: S.showIds, origins: originPoints(), dimHits: S.dimHits, setout: S.showSetout && !S.dragging && S.mode !== 'edit', multi: items.length > 1 });
+    Render.scene(ctx, W, H, S.view, items, { vertices: S.mode === 'edit', selVertex: S.selVertex, selOpening: S.selOpening, trace: S.trace, calib: S.calib || (S.opTrace && S.opTrace.length ? S.opTrace : null), ids: S.showIds, origins: originPoints(), dimHits: S.dimHits, setout: S.showSetout && !S.dragging && S.mode !== 'edit' && v.mode !== 'folded', multi: items.length > 1 });
     const el = $('#stat'); if (!el) return;
     if (S.dragging) { el.innerHTML = '<span>moving…</span>'; return; }
     const tot = items.reduce((a, it) => { const st = it.res?.stats; if (!st) return a; a.n += st.needed; a.c += st.cuts; a.s += st.slivers; if (st.minCut != null) a.m = Math.min(a.m, st.minCut); return a; }, { n: 0, c: 0, s: 0, m: Infinity });
+    if (!items.some(it => it.tile)) { el.innerHTML = '<span class="bad">Choose a tile — Tile &amp; pattern tab</span>'; return; }
     const sl = geoSettings(cur().surface).sliver;
     el.innerHTML = `<span>${tot.n} tiles</span><span>${tot.c} cuts</span><span class="${tot.m < sl ? 'bad' : 'good'}">smallest ${isFinite(tot.m) ? Math.round(tot.m) + ' mm' : '-'}</span>${tot.s ? `<span class="bad">${tot.s} sliver${tot.s > 1 ? 's' : ''}</span>` : ''}`;
   }
@@ -716,20 +900,23 @@
     }, { passive: false });
 
     function memberAt(w) {
-      const v = curView(); const off = offsets(v);
-      for (const { surface } of v.members) { const o = off.get(surface.id); if (Geo.pointInRing([w[0] - o[0], w[1] - o[1]], surface.outline)) return surface; }
+      const v = curView();
+      for (const { surface } of v.members) { if (Geo.pointInRing(toLocal(v, surface, w), surface.outline)) return surface; }
       return null;
+    }
+    // moving the tiles of one area (and everything it is locked to)
+    function originDragger(s) {
+      const g2 = groupOf(s);
+      if (!g2) { const ox = +s.pattern.ox || 0, oy = +s.pattern.oy || 0; return (dx, dy) => { s.pattern.ox = Math.round(ox + dx); s.pattern.oy = Math.round(oy + dy); }; }
+      if (g2.mode === 'plan') { const ox = +g2.pattern.ox || 0, oy = +g2.pattern.oy || 0; return (dx, dy) => { g2.pattern.ox = Math.round(ox + dx); g2.pattern.oy = Math.round(oy + dy); }; }
+      const gx = +g2.pattern.ox || 0, gy = +g2.pattern.oy || 0, sx = +s.pattern.ox || 0, sy = +s.pattern.oy || 0;
+      return (dx, dy) => { if (g2.lockX) g2.pattern.ox = Math.round(gx + dx); else s.pattern.ox = Math.round(sx + dx); if (g2.lockY !== false) g2.pattern.oy = Math.round(gy + dy); else s.pattern.oy = Math.round(sy + dy); };
     }
     function startGesture(p) {
       const v = curView(); const { surface } = cur(); const w = world(...p); const off = offsets(v);
       const base = { p0: p, t0: Date.now(), w0: w, moved: false, v0: { ...S.view } };
       if (S.trace || S.calib || S.opTrace) return { ...base, type: 'tap' };
-      if (S.mode === 'move') {
-        const hit = memberAt(w) || surface;
-        if (v.mode === 'plan') return { ...base, type: 'origin', target: v.group.pattern, ox: +v.group.pattern.ox || 0, oy: +v.group.pattern.oy || 0, hit };
-        if (v.mode === 'strip') return { ...base, type: 'strip', wall: hit, ox: +hit.pattern.ox || 0, oy: +v.group.pattern.oy || 0, hit };
-        return { ...base, type: 'origin', target: surface.pattern, ox: +surface.pattern.ox || 0, oy: +surface.pattern.oy || 0, hit };
-      }
+      if (S.mode === 'move') { const hit = memberAt(w) || surface; if (!tileOf(hit)) return { ...base, type: 'pan' }; return { ...base, type: 'drag', apply: originDragger(hit), rot: rots(v).get(hit.id) || 0, hit }; }
       if (S.mode === 'arrange' && v.mode === 'plan') { const hit = memberAt(w); if (hit) { S.selId = hit.id; return { ...base, type: 'arrange', s: hit, px: hit.place.x, py: hit.place.y }; } }
       if (S.mode === 'bg' && surface.bg) return { ...base, type: 'bg', bx: surface.bg.x, by: surface.bg.y };
       if (S.mode === 'edit') {
@@ -738,7 +925,7 @@
         surface.outline.forEach((q, i) => { const s = Render.toS(S.view, W, H, [q[0] + o[0], q[1] + o[1]]); const d = Math.hypot(s[0] - p[0], s[1] - p[1]); if (d < bd) { bd = d; best = i; } });
         if (best >= 0) { S.selVertex = best; return { ...base, type: 'vertex', i: best, q0: surface.outline[best].slice() }; }
         const lw = [w[0] - o[0], w[1] - o[1]];
-        for (let i = surface.openings.length - 1; i >= 0; i--) { const op = surface.openings[i]; if (lw[0] >= op.x && lw[0] <= +op.x + +op.w && lw[1] >= op.y && lw[1] <= +op.y + +op.h) { S.selOpening = i; return { ...base, type: 'opening', i, x0: +op.x, y0: +op.y }; } }
+        for (let i = surface.openings.length - 1; i >= 0; i--) { const op = surface.openings[i]; if (Geo.pointInRing(lw, Geo.opRing(op))) { S.selOpening = i; return { ...base, type: 'opening', i, x0: +op.x, y0: +op.y, pts0: op.pts ? op.pts.map(q => q.slice()) : null }; } }
       }
       return { ...base, type: 'pan' };
     }
@@ -751,8 +938,7 @@
       const wdx = dx / s, wdy = -dy / s;
       if (g.type === 'pan' || g.type === 'tap') { S.view = { ...g.v0, cx: g.v0.cx - dx / s, cy: g.v0.cy + dy / s }; requestDraw(); return; }
       g.dragging = true;
-      if (g.type === 'origin') { g.target.ox = Math.round(g.ox + wdx); g.target.oy = Math.round(g.oy + wdy); S.dragging = true; }
-      if (g.type === 'strip') { g.wall.pattern.ox = Math.round(g.ox + wdx); curView().group.pattern.oy = Math.round(g.oy + wdy); S.dragging = true; }
+      if (g.type === 'drag') { const l = Geo.rot([wdx, wdy], -g.rot); g.apply(l[0], l[1]); S.dragging = true; }
       if (g.type === 'arrange') {
         g.dragging = true;
         let nx = g.px + wdx, ny = g.py + wdy; const thr = 14 / s;
@@ -771,7 +957,7 @@
         const sn = 12 / s; [pr, nxp].forEach(q => { if (Math.abs(nx - q[0]) < sn) nx = q[0]; if (Math.abs(ny - q[1]) < sn) ny = q[1]; });
         surface.outline[g.i] = [nx, ny]; S.dragging = true;
       }
-      if (g.type === 'opening') { const o = surface.openings[g.i]; o.x = Math.round(g.x0 + wdx); o.y = Math.max(surface.kind === 'wall' ? 0 : -1e9, Math.round(g.y0 + wdy)); S.dragging = true; }
+      if (g.type === 'opening') { const o = surface.openings[g.i]; o.x = Math.round(g.x0 + wdx); o.y = Math.max(surface.kind === 'wall' && !g.pts0 ? 0 : -1e9, Math.round(g.y0 + wdy)); if (g.pts0) o.pts = g.pts0.map(q => [Math.round(q[0] + o.x - g.x0), Math.round(q[1] + o.y - g.y0)]); S.dragging = true; }
       requestDraw();
     }
     function endGesture(g, p) {
@@ -787,9 +973,9 @@
     }
     function onTap(w, p, g) {
       const v = curView(); const { surface } = cur(); const [W, H] = dims(); const o = offsets(v).get(surface.id);
-      const lw = [w[0] - o[0], w[1] - o[1]];
+      const lw = toLocal(v, surface, w);
       if (S.trace) {
-        if (S.trace.length >= 3) { const f = Render.toS(S.view, W, H, [S.trace[0][0] + o[0], S.trace[0][1] + o[1]]); if (Math.hypot(f[0] - p[0], f[1] - p[1]) < 18) return finishTrace(); }
+        if (S.trace.length >= 3) { const f = Render.toS(S.view, W, H, toWorld(v, surface, S.trace[0])); if (Math.hypot(f[0] - p[0], f[1] - p[1]) < 18) return finishTrace(); }
         let q = [Math.round(lw[0]), Math.round(lw[1])];
         if (S.traceOrtho && S.trace.length) { const pr = S.trace[S.trace.length - 1]; const dx = Math.abs(q[0] - pr[0]), dy = Math.abs(q[1] - pr[1]); if (dy < dx * 0.18) q[1] = pr[1]; else if (dx < dy * 0.18) q[0] = pr[0]; }
         S.trace.push(q); requestDraw(); return;
@@ -840,6 +1026,11 @@
     const { surface } = cur();
     if (!S.trace || S.trace.length < 3) { toast('Tap at least 3 corners'); return; }
     checkpoint();
+    if (S.traceTarget === 'op') {
+      const pts = S.trace.map(p => [Math.round(p[0]), Math.round(p[1])]); const b = Geo.bbox(pts);
+      surface.openings.push({ id: Store.uid(), type: 'other', name: 'Not tiled', x: Math.round(b.x0), y: Math.round(b.y0), w: Math.round(b.w), h: Math.round(b.h), pts });
+      S.trace = null; S.traceTarget = null; S.cache.clear(); save(); toast('Not-tiled area added'); setModeButtons(); renderPane(); requestDraw(); return;
+    }
     const n = Geo.normaliseOutline(S.trace);
     surface.outline = n.pts;
     surface.openings.forEach(o => { o.x = Math.round(+o.x + n.dx); o.y = Math.round(+o.y + n.dy); });
@@ -883,8 +1074,9 @@
     }
     if (t.dataset.v != null) { const i = +t.dataset.v, k = +t.dataset.k; if (t.value === '') return; surface.outline[i][k] = +t.value; save(); requestDraw(); return; }
     if (t.dataset.o != null) {
-      const o = surface.openings[+t.dataset.o]; const k = t.dataset.ok;
+      const o = surface.openings[+t.dataset.o]; const k = t.dataset.ok; const old = +o[k];
       o[k] = t.type === 'checkbox' ? t.checked : t.type === 'number' ? (t.value === '' ? 0 : +t.value) : t.value;
+      if (o.pts && (k === 'x' || k === 'y')) { const d = +o[k] - old, ax = k === 'x' ? 0 : 1; o.pts.forEach(q => { q[ax] += d; }); }
       if (k === 'type' && isChange) { o.name = OP_TYPES[o.type]; o.tiled = o.type === 'unit'; renderPane(); }
       save(); requestDraw(); return;
     }
@@ -893,7 +1085,17 @@
       save(); requestDraw(); if (isChange && k === 'edge') renderPane(); return;
     }
     if (t.dataset.t) { const tile = tileOf(surface); tile[t.dataset.t] = t.type === 'number' && t.value !== '' ? +t.value : t.value; S.cache.clear(); save(); requestDraw(); return; }
-    if (t.id === 'tileSel' && isChange) { patternTarget(surface).tileId = t.value; S.cache.clear(); save(); renderPane(); requestDraw(); }
+    if (t.id === 'tileSel' && isChange) { tileTarget(surface).tileId = t.value; S.cache.clear(); save(); renderPane(); requestDraw(); }
+    if (t.id === 'tileMode' && isChange) { const g = groupOf(surface); if (t.value === 'separate') g.members.forEach(id => { const m = findSurface(id).surface; if (m) m.tileId = g.tileId; }); else g.tileId = surface.tileId || g.tileId; g.tileMode = t.value; S.cache.clear(); save(); renderPane(); requestDraw(); }
+    if ((t.id === 'lockX' || t.id === 'lockY') && isChange) {
+      const g = groupOf(surface); const mem = g.members.map(id => findSurface(id).surface).filter(Boolean); const effs = new Map(mem.map(m => [m.id, eff(m).pattern]));
+      if (t.id === 'lockY') { if (t.checked) g.pattern.oy = effs.get(surface.id).oy; else mem.forEach(m => { m.pattern.oy = effs.get(m.id).oy; }); g.lockY = t.checked; }
+      else { if (t.checked) g.pattern.ox = effs.get(surface.id).ox + stripCum(g).get(surface.id) + g.members.indexOf(surface.id) * cornerAllow(); else mem.forEach(m => { m.pattern.ox = effs.get(m.id).ox; }); g.lockX = t.checked; }
+      S.cache.clear(); S.best = null; save(); renderPane(); requestDraw();
+      toast(t.checked ? 'Locked — walls now move together' : 'Unlocked — each wall moves on its own');
+    }
+    if (t.dataset.orig && isChange && t.value !== '') { const e2 = eff(surface).pattern; setOrigin(surface, t.dataset.orig === 'x' ? [+t.value, +e2.oy] : [+e2.ox, +t.value], 'Custom'); }
+    if (t.id === 'linkSel' && isChange) { const [fid, edge] = t.value.split('|'); linkWall(surface, fid || null, edge); save(); S.view = null; renderPane(); requestDraw(); toast(fid ? 'Wall linked — its width now follows the floor and the floor follows it' : 'Wall unlinked'); }
     if (t.id === 'borderTile' && isChange) { surface.settings.border.tileId = t.value; S.cache.clear(); save(); renderPane(); requestDraw(); }
     if (t.id === 'idsChk') { S.showIds = t.checked; requestDraw(); }
     if (t.id === 'setChk') { S.showSetout = t.checked; requestDraw(); }
@@ -916,7 +1118,10 @@
         <div class="row" style="margin-top:8px"><button class="btn sm" data-p="rect">Rectangle</button></div>
         <div class="grid" style="margin-top:10px"><label class="f">Cut-out width mm<input id="qlW" type="number" inputmode="decimal" value="${Math.round(bb.w / 3)}"></label><label class="f">Cut-out ${s.kind === 'wall' ? 'height' : 'depth'} mm<input id="qlH" type="number" inputmode="decimal" value="${Math.round(bb.h / 3)}"></label>
           <label class="f">Cut-out corner<select id="qlC"><option value="tr">Top right</option><option value="tl">Top left</option><option value="br">Bottom right</option><option value="bl">Bottom left</option></select></label></div>
-        <div class="row" style="margin-top:8px"><button class="btn sm sec" data-p="L">L-shape</button>${s.kind === 'wall' ? '<button class="btn sm sec" data-p="slope">Sloped ceiling</button>' : ''}</div></div>
+        <div class="row" style="margin-top:8px"><button class="btn sm sec" data-p="L">L-shape</button>${s.kind === 'wall' ? '<button class="btn sm sec" data-p="slope">Sloped ceiling</button>' : ''}</div>
+        <div class="row" style="margin-top:10px"><span class="muted">Wrong corner or side?</span><button class="btn sm sec" data-p="mirrorx">⇆ Flip left/right</button><button class="btn sm sec" data-p="mirrory">⇅ Flip top/bottom</button></div>
+        <div class="note">Flipping moves cut-outs and slopes to the other side. Openings stay where they are.</div></div>
+      ${linkCard(s)}
       <div class="card"><h2>Wall by wall</h2>
         <div class="muted" style="margin-bottom:8px">Start at the bottom-left corner going right. Enter each length and which way you turn at the end. Going round anticlockwise, outside corners are left turns and inside corners are right turns. The last wall closes the shape.</div>
         ${walls.map((w, i) => `<div class="vtx" style="grid-template-columns:24px 1fr 1.3fr"><span class="muted">${i + 1}</span><input type="number" inputmode="decimal" data-wl="${i}" value="${w.len}">${i < walls.length - 1 ? turnSel(i, w.turn) : '<span class="muted">closes</span>'}</div>`).join('')}
@@ -925,11 +1130,24 @@
         ${s.outline.map((p, i) => `<div class="vtx"><span class="muted">${i + 1}</span><input type="number" inputmode="decimal" data-v="${i}" data-k="0" value="${r1(p[0])}"><input type="number" inputmode="decimal" data-v="${i}" data-k="1" value="${r1(p[1])}"><button class="x" data-delv="${i}" aria-label="Remove corner">×</button></div>`).join('')}
         <div class="row"><button class="btn sm sec" data-p="addv">+ Corner</button><button class="btn sm sec" data-p="norm">Tidy (move to 0,0)</button></div></div>`;
   }
+  function linkCard(s) {
+    if (s.kind === 'wall') {
+      const floors = allSurfaces().filter(x => x.surface.kind === 'floor');
+      if (!floors.length) return '';
+      const opts = floors.flatMap(({ room, surface: f }) => f.outline.map((p, i) => [`${f.id}|${i}`, `${room.name} — ${f.name}, side ${i + 1} (${Math.round(edgeLen(f, i))} mm)`]));
+      const cur2 = s.link ? `${s.link.floorId}|${s.link.edge}` : '';
+      return `<div class="card"><h2>Stands on</h2><label class="f">Floor side this wall sits on<select id="linkSel"><option value="">Not linked</option>${opts.map(([v, l]) => `<option value="${v}" ${v === cur2 ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
+        <div class="note">Linked walls and floors keep the same length: change one and the other follows. Doors on the wall become doorways on the floor. Linked walls can be seen folded out round the floor (▣ Fold out).</div></div>`;
+    }
+    const walls = allSurfaces().filter(x => x.surface.link && x.surface.link.floorId === s.id);
+    return walls.length ? `<div class="card"><h2>Walls on this floor</h2><div class="muted">${walls.map(w => `${esc(w.surface.name)} on side ${w.surface.link.edge + 1}`).join(' · ')}</div><div class="row" style="margin-top:8px"><button class="btn sm" data-p="openfold">▣ Open folded-out view</button></div></div>` : '';
+  }
   function paneOpenings(s) {
     const b = Geo.bbox(s.outline);
     const edges = s.outline.map((p, i) => { const q = s.outline[(i + 1) % s.outline.length]; return `Side ${i + 1} (${Math.round(Math.hypot(q[0] - p[0], q[1] - p[1]))})`; });
     const types = s.kind === 'floor' ? ['unit', 'bath', 'tray', 'other'] : ['door', 'window', 'niche', 'bath', 'tray', 'other'];
-    return `<div class="card"><h2>Add</h2><div class="row">${types.map(k => `<button class="btn sm sec" data-addop="${k}">+ ${OP_TYPES[k]}</button>`).join('')}${s.kind === 'floor' ? '<button class="btn sm sec" data-p="adddoor">+ Doorway</button>' : ''}</div>
+    const drawBtn = '<button class="btn sm" data-p="drawop">✎ Draw a not-tiled area (any shape)</button>';
+    return `<div class="card"><h2>Add</h2><div class="row">${types.map(k => `<button class="btn sm sec" data-addop="${k}">+ ${OP_TYPES[k]}</button>`).join('')}${s.kind === 'floor' ? '<button class="btn sm sec" data-p="adddoor">+ Doorway</button>' : ''}</div><div class="row" style="margin-top:8px">${drawBtn}</div>
       <div class="note">x, y is the bottom-left corner${s.kind === 'wall' ? ' (y from floor level)' : ''}. Area is ${Math.round(b.w)} × ${Math.round(b.h)} mm. Drag them on the drawing with ✎ Shape.${s.kind === 'floor' ? ' Kitchen units are tiled under by default: they show as blue dashes, and the drawing shows where joints fall against their fronts.' : ''}</div></div>
       ${s.kind === 'floor' ? `<div class="card"><h2>Doorways</h2>${(s.doorways || []).map((d, i) => `<div class="op"><div class="grid" style="grid-template-columns:1fr 1fr">
           <label class="f">Name<input data-d="${i}" data-dk="name" value="${esc(d.name)}"></label>
@@ -940,12 +1158,15 @@
         <label class="f">Type<select data-o="${i}" data-ok="type">${Object.entries(OP_TYPES).map(([k, l]) => `<option value="${k}" ${o.type === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
         <label class="f">Name<input data-o="${i}" data-ok="name" value="${esc(o.name)}"></label>
         <label class="f">x (from left)<input type="number" inputmode="decimal" data-o="${i}" data-ok="x" value="${o.x}"></label><label class="f">y (from ${s.kind === 'wall' ? 'floor' : 'bottom'})<input type="number" inputmode="decimal" data-o="${i}" data-ok="y" value="${o.y}"></label>
-        <label class="f">Width<input type="number" inputmode="decimal" data-o="${i}" data-ok="w" value="${o.w}"></label><label class="f">Height${s.kind === 'floor' ? ' (depth)' : ''}<input type="number" inputmode="decimal" data-o="${i}" data-ok="h" value="${o.h}"></label></div>
+        <label class="f">Width<input type="number" inputmode="decimal" data-o="${i}" data-ok="w" value="${o.w}" ${o.pts ? 'disabled title="Drawn shape — redraw to change its size"' : ''}></label><label class="f">Height${s.kind === 'floor' ? ' (depth)' : ''}<input type="number" inputmode="decimal" data-o="${i}" data-ok="h" value="${o.h}" ${o.pts ? 'disabled' : ''}></label></div>
         ${['unit', 'other', 'bath', 'tray'].includes(o.type) && s.kind === 'floor' ? `<label class="chk"><input type="checkbox" data-o="${i}" data-ok="tiled" ${o.tiled ? 'checked' : ''}> Tiled under it (show only)</label>` : ''}
         <div class="row" style="margin-top:6px"><button class="btn sm sec" data-opc="${i}">Centre across</button><button class="btn sm danger" data-opdel="${i}">Remove</button></div></div>`).join('') || '<div class="muted">No openings.</div>'}</div>`;
   }
   function paneTile(s) {
-    const t = tileOf(s); const g = groupOf(s); const p = eff(s).pattern; const unit = Geo.buildUnit(t, p);
+    const t = tileOf(s); const g = groupOf(s); const p = eff(s).pattern;
+    const modeCard = g ? `<div class="card"><h2>Tiles in “${esc(g.name)}”</h2><label class="f">Tile choice<select id="tileMode"><option value="linked" ${g.tileMode !== 'separate' ? 'selected' : ''}>Same tile on every ${g.mode === 'strip' ? 'wall' : 'area'}</option><option value="separate" ${g.tileMode === 'separate' ? 'selected' : ''}>Choose a tile for each ${g.mode === 'strip' ? 'wall' : 'area'}</option></select></label><div class="note">The pattern and joint stay shared. Offcuts are only shared between ${g.mode === 'strip' ? 'walls' : 'areas'} using the same tile.</div></div>` : '';
+    if (!t) return `${modeCard}<div class="card" style="border:2px dashed var(--bronze)"><h2>Choose a tile</h2><div class="muted">This job has no tiles yet.</div><div class="row" style="margin-top:8px"><button class="btn" data-p="newtile">+ Add a tile</button></div></div>`;
+    const unit = Geo.buildUnit(t, p);
     let extra = '';
     if (p.type === 'customOffset') extra = num('pattern.offsetPct', 'Offset % of tile', p.offsetPct);
     if (p.type === 'chevron') extra = num('pattern.chevronAngle', 'Chevron angle °', p.chevronAngle);
@@ -954,7 +1175,7 @@
     if (p.type === 'windmill') extra = `<div class="note" style="grid-column:1/-1">Insert square: ${unit.sizes[1] ? unit.sizes[1].label : 'none (tiles too square)'}.</div>`;
     if (['herringbone', 'herringbone45', 'doubleHerringbone', 'chevron', 'basketweave', 'windmill'].includes(p.type)) extra += `<div class="note" style="grid-column:1/-1">Uses the long side × short side of the tile.</div>`;
     const bd = s.settings.border || {};
-    return `<div class="card"><h2>Tile</h2>${g ? `<div class="note">Shared by everything in “${esc(g.name)}”.</div>` : ''}
+    return `${modeCard}<div class="card"><h2>Tile${g && g.tileMode === 'separate' ? ` — ${esc(s.name)}` : ''}</h2>${g && g.tileMode !== 'separate' ? `<div class="note">Shared by everything in “${esc(g.name)}”.</div>` : ''}
         <div class="row"><label class="f" style="flex:1">Tile<select id="tileSel">${S.job.tiles.map(x => `<option value="${x.id}" ${x.id === t.id ? 'selected' : ''}>${esc(x.name)} (${x.w}×${x.h})</option>`).join('')}</select></label><button class="btn sm sec" data-p="newtile" style="align-self:flex-end">+ New</button></div>
         <div style="margin-top:8px">${tileFields(t)}</div><div class="note">Tile changes apply to every area using this tile.</div></div>
       <div class="card"><h2>Pattern</h2><div class="grid">
@@ -963,32 +1184,38 @@
         <div class="row" style="margin-top:8px"><span class="muted">Rotate:</span>${[0, 45, 90, -45].map(a => `<button class="btn sm sec" data-rot="${a}">${a}°</button>`).join('')}</div></div>
       <div class="card"><h2>Border${g ? ` — ${esc(s.name)}` : ''}</h2>
         <label class="chk"><input type="checkbox" data-b="settings.border.on" ${bd.on ? 'checked' : ''}> Border round the edge of this area</label>
-        ${bd.on ? `<div class="grid"><label class="f">Border tile<select id="borderTile">${S.job.tiles.map(x => `<option value="${x.id}" ${x.id === (bd.tileId || S.job.tiles[0].id) ? 'selected' : ''}>${esc(x.name)} (${x.w}×${x.h})</option>`).join('')}</select></label>${num('settings.border.rows', 'Rows', bd.rows || 1)}</div>
+        ${bd.on ? `<div class="grid"><label class="f">Border tile<select id="borderTile">${S.job.tiles.map(x => `<option value="${x.id}" ${x.id === (bd.tileId || (S.job.tiles[0]?.id || null)) ? 'selected' : ''}>${esc(x.name)} (${x.w}×${x.h})</option>`).join('')}</select></label>${num('settings.border.rows', 'Rows', bd.rows || 1)}</div>
           <div class="note">Border tiles run along each side, centred on the side, with butt-jointed corners. The main pattern fills the middle. Add a separate tile for the border (e.g. 600×100) under Tile → + New.</div>` : ''}</div>`;
   }
   function paneSetout(s) {
-    const v = curView(); const g = v.group; const t = tileOf(s); const c = calc(s); const st = c.res?.stats;
+    const g = groupOf(s); const t = tileOf(s); const c = calc(s); const st = c.res?.stats;
+    if (!t) return '<div class="empty">Choose a tile first (Tile &amp; pattern tab).</div>';
     const e = eff(s); const cand = Geo.startCandidates(e, t);
+    const lockCard = g && g.mode === 'strip' ? `<div class="card"><h2>Walls together</h2>
+        <label class="chk"><input type="checkbox" id="lockY" ${g.lockY !== false ? 'checked' : ''}> 🔒 Courses level all the way round (up/down moves every wall)</label>
+        <label class="chk"><input type="checkbox" id="lockX" ${g.lockX ? 'checked' : ''}> 🔒 Tiles carry round the corners (left/right moves every wall; the offcut from the end of one wall starts the next)</label>
+        <div class="note">Untick to move walls on their own. Offcuts are shared between walls either way.</div></div>` : '';
+    const floorAlign = s.kind === 'wall' && s.link && findSurface(s.link.floorId).surface ? `<button class="btn sm" data-p="alignfloor">Line up wall joints with the floor joints</button>` : '';
     const gs = geoSettings(s);
     const bestHtml = S.best ? S.best.map((b, i) => `<div class="opt" data-best="${i}"><div class="rk">${i + 1}</div><div class="main"><b>${esc(b.label)}</b>${b.stats.needed} tiles · smallest cut ${b.stats.minCut != null ? Math.round(b.stats.minCut) + ' mm' : 'none'} · ${b.stats.cuts} cuts${b.stats.slivers ? ` · <span style="color:var(--red)">${b.stats.slivers} slivers</span>` : ''}</div></div>`).join('') : '';
     const ref = c.ref;
     const refTxt = ref ? `<div class="note" style="border-left:3px solid #15803D"><b>For the fitter:</b> set-out point is <b>${Math.round(ref.dims.left)} mm</b> from the left ${s.kind === 'wall' ? 'end' : 'wall'} and <b>${Math.round(ref.dims.bottom)} mm</b> from the ${s.kind === 'wall' ? 'floor' : 'bottom wall'}${ref.dirs.length ? (ref.herringbone ? ', with the herringbone joint line running through it (green line).' : `, on a joint${ref.dirs.length === 2 ? ' where two straight joint lines cross (green lines)' : ' with a straight joint line through it (green line)'}.`) : '.'}</div>` : '';
-    return `<div class="card"><h2>Find the best start${g ? ' — whole view' : ''}</h2>
-        <div class="muted">${g ? (g.mode === 'strip' ? 'Keeps courses level round the room and finds the best position for each wall.' : 'Sets out all joined areas as one, so the tile runs through.') : `Tries every sensible start (centre, corners, edges, openings${(s.doorways || []).length ? ', doorways' : ''}${(s.openings || []).some(o => o.tiled) ? ', unit fronts' : ''}${Geo.herringboneAxis(t, e.pattern) ? ', herringbone joint line on centre' : ''}) and ranks them: no slivers first, then the biggest smallest cut, then fewest tiles.`}</div>
+    return `${lockCard}<div class="card"><h2>Find the best start${g ? ` — all of “${esc(g.name)}”` : ''}</h2>
+        <div class="muted">${g ? (g.mode === 'strip' ? (g.lockX ? 'Treats the walls as one continuous run round the room.' : g.lockY !== false ? 'Keeps courses level round the room and finds the best position for each wall.' : 'Finds the best start for each wall on its own.') : 'Sets out all joined areas as one, so the tile runs through.') : `Tries every sensible start (centre, corners, edges, openings${(s.doorways || []).length ? ', doorways' : ''}${(s.openings || []).some(o => o.tiled) ? ', unit fronts' : ''}${Geo.herringboneAxis(t, e.pattern) ? ', herringbone joint line on centre' : ''}) and ranks them: no slivers first, then the biggest smallest cut, then fewest tiles.`}</div>
         <div class="row" style="margin-top:8px"><button class="btn" data-p="best">Find best start</button></div><div id="bestList" style="margin-top:8px">${bestHtml}</div></div>
       <div class="card"><h2>Snap to a start${g ? ` (using ${esc(s.name)})` : ''}</h2>
         ${cand.special.length ? `<div class="row" style="margin-bottom:8px">${cand.special.map((sp, i) => `<button class="btn sm sec" data-sp="${i}">${esc(sp.label)}</button>`).join('')}</div>` : ''}
         <div class="grid" style="grid-template-columns:1fr">
         <label class="f">Across (left ↔ right)<select id="sx">${cand.xs.map((x, i) => `<option value="${i}">${esc(x.label)}</option>`).join('')}</select></label>
         <label class="f">Up / down<select id="sy">${cand.ys.map((y, i) => `<option value="${i}">${esc(y.label)}</option>`).join('')}</select></label></div>
-        <div class="row" style="margin-top:8px"><button class="btn sm" data-p="snap">Apply</button></div>
+        <div class="row" style="margin-top:8px"><button class="btn sm" data-p="snap">Apply</button>${floorAlign}</div>
         ${s.kind === 'wall' ? `<div class="grid" style="margin-top:10px">${num('settings.battenY', 'Batten height mm (blank = none)', s.settings.battenY, 'placeholder="none"')}</div>` : ''}</div>
       <div class="card"><h2>Fine adjust</h2>
         <div class="row" style="align-items:flex-start;gap:14px">
           <div class="nudge"><span></span><button data-n="0,1" aria-label="Up">↑</button><span></span><button data-n="-1,0" aria-label="Left">←</button><button data-n="c" aria-label="Centre">⊙</button><button data-n="1,0" aria-label="Right">→</button><span></span><button data-n="0,-1" aria-label="Down">↓</button><span></span></div>
           <div style="flex:1;min-width:140px"><label class="f">Step mm<select id="nudgeStep">${[1, 5, 10, 25, 50, 100].map(x => `<option ${S.nudge === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
-            <div class="grid" style="grid-template-columns:1fr 1fr;margin-top:6px">${num('pattern.ox', 'Start x', Math.round(g && g.mode === 'plan' ? g.pattern.ox : s.pattern.ox))}${num('pattern.oy', 'Start y', Math.round(g ? g.pattern.oy : s.pattern.oy))}</div></div></div>
-        <div class="note">Or use <b>✥ Tiles</b> and drag on the drawing.${g && g.mode === 'strip' ? ' Up/down moves every wall (courses stay level); left/right moves only the selected wall.' : ''}</div></div>
+            <div class="grid" style="grid-template-columns:1fr 1fr;margin-top:6px"><label class="f">Start x<input type="number" inputmode="decimal" data-orig="x" value="${Math.round(e.pattern.ox)}"></label><label class="f">Start y<input type="number" inputmode="decimal" data-orig="y" value="${Math.round(e.pattern.oy)}"></label></div></div></div>
+        <div class="note">Or use <b>✥ Tiles</b> and drag on the drawing.${g && g.mode === 'strip' ? ` Up/down moves ${g.lockY !== false ? 'every wall' : 'this wall only'}; left/right moves ${g.lockX ? 'every wall' : 'this wall only'}.` : ''}</div></div>
       <div class="card"><h2>Set-out lines</h2><label class="chk"><input type="checkbox" id="setChk" ${S.showSetout ? 'checked' : ''}> Show set-out lines and dimensions on the drawing</label>${refTxt}</div>
       <div class="card"><h2>Rules for ${esc(s.name)}</h2><div class="grid">
         ${num('settings.sliver', 'Sliver warning under mm', s.settings.sliver, `placeholder="default ${S.settings.sliver}"`)}${num('settings.spare', 'Spare / breakage %', s.settings.spare, `placeholder="auto ${Geo.PATTERNS[e.pattern.type]?.waste}%"`)}</div>
@@ -996,7 +1223,7 @@
         ${st ? `<div class="muted">Now: ${st.needed} tiles, ${st.cuts} cuts, smallest ${st.minCut != null ? Math.round(st.minCut) + ' mm' : '-'}${st.slivers ? `, <b style="color:var(--red)">${st.slivers} under ${gs.sliver} mm</b>` : ''}.</div>` : ''}</div>`;
   }
   function paneCuts(s) {
-    const c = calc(s); if (!c.res) return '<div class="empty">Set up the shape first.</div>';
+    const c = calc(s); if (!c.res) return `<div class="empty">${tileOf(s) ? 'Set up the shape first.' : 'Choose a tile first (Tile &amp; pattern tab).'}</div>`;
     const st = c.res.stats; const sizes = c.res.sizes;
     const units = c.res.units || [];
     return `<div class="card"><h2>Summary — ${esc(s.name)}</h2><table class="t"><tr><th>Tile</th><th class="n">Full</th><th class="n">Cut</th><th class="n">From offcut</th><th class="n">Tiles</th></tr>
@@ -1005,8 +1232,8 @@
       ${units.length ? `<div class="card"><h2>Units tiled under</h2>${units.map(u => `<div style="margin-bottom:8px"><b>${esc(u.name)}</b> — ${fmt(u.m2, 2)} m² under (about ${u.tiles} tiles)<ul style="margin:4px 0;padding-left:18px">${u.fronts.map(f => `<li>${esc(f.edge)} front: ${f.dist == null ? esc(f.note) : f.side === 'on' ? 'joint right on the unit line' : `nearest joint ${f.dist} mm ${f.side === 'under' ? 'under the unit' : 'out from the unit'}`}${f.dist != null && f.side !== 'on' && f.dist < 50 ? ' <b style="color:var(--red)">— close to the plinth line</b>' : ''}</li>`).join('') || '<li>Against walls on all sides</li>'}</ul></div>`).join('')}
         <div class="note">Tip: Set-out tab → “Joint on … edge” puts a joint exactly on a unit front.</div></div>` : ''}
       <div class="card"><h2>Cut list (mm)</h2>${c.cuts.length ? `<table class="t"><tr>${sizes.length > 1 ? '<th>Tile</th>' : ''}<th>Piece</th><th class="n">Qty</th><th>Pieces</th></tr>
-        ${c.cuts.map(g => `<tr class="${g.sliver ? 'flag' : ''}">${sizes.length > 1 ? `<td>${esc(sizes[g.sizeIdx].label)}</td>` : ''}<td>${esc(g.desc)}${g.sliver ? ' ⚠' : ''}${g.offcut ? `<div class="muted">${g.offcut} from offcut</div>` : ''}</td><td class="n">${g.count}</td><td class="muted">${g.ids.length <= 10 ? g.ids.map(i => '#' + i).join(' ') : g.ids.length + ' pieces'}</td></tr>`).join('')}</table>` : '<div class="muted">No cuts — every tile is full.</div>'}
-        <div class="note">Sizes are the finished piece, along the tile's length × width. Notch = the corner taken out. Angled pieces list their sides in order. Offcut reuse is an estimate.</div></div>`;
+        ${c.cuts.map(g => `<tr class="${g.sliver ? 'flag' : ''}">${sizes.length > 1 ? `<td>${esc(sizes[g.sizeIdx].label)}</td>` : ''}<td>${esc(g.desc)}${g.sliver ? ' ⚠' : ''}${g.offcut ? `<div class="muted">${g.offcut} from offcut${g.from.length ? ` (of ${g.from.slice(0, 3).map(esc).join(', ')}${g.from.length > 3 ? '…' : ''})` : ''}</div>` : ''}</td><td class="n">${g.count}</td><td class="muted">${g.ids.length <= 10 ? g.ids.map(i => '#' + i).join(' ') : g.ids.length + ' pieces'}</td></tr>`).join('')}</table>` : '<div class="muted">No cuts — every tile is full.</div>'}
+        <div class="note">Sizes are the finished piece, along the tile's length × width. Notch = the corner taken out. Angled pieces list their sides in order.<br><b>Offcuts</b> are only reused where the edges that meet other tiles are factory edges; cut edges go against walls, openings and corners. Strips can be turned 180°, so one tile can give two cuts.${c.pooled ? ' Offcuts are shared with the other areas in this view — e.g. the end of one wall starts the next.' : ''}</div></div>`;
   }
   function paneOrder(s) {
     const v = curView(); const c = calc(s); if (!c.res) return '<div class="empty">Set up the shape first.</div>';
@@ -1048,12 +1275,16 @@
     // o is the origin in this area's own coordinates
     const g = groupOf(s);
     if (!g) { s.pattern.ox = Math.round(o[0] * 10) / 10; s.pattern.oy = Math.round(o[1] * 10) / 10; s.startLabel = label; }
-    else if (g.mode === 'strip') { s.pattern.ox = Math.round(o[0] * 10) / 10; g.pattern.oy = Math.round(o[1] * 10) / 10; g.startLabel = label; }
+    else if (g.mode === 'strip') {
+      if (g.lockX) g.pattern.ox = r10(o[0] + stripCum(g).get(s.id) + g.members.indexOf(s.id) * cornerAllow()); else s.pattern.ox = r10(o[0]);
+      if (g.lockY !== false) g.pattern.oy = r10(o[1]); else s.pattern.oy = r10(o[1]);
+      g.startLabel = label;
+    }
     else { g.pattern.ox = Math.round((o[0] + s.place.x) * 10) / 10; g.pattern.oy = Math.round((o[1] + s.place.y) * 10) / 10; g.startLabel = label; }
     S.cache.clear(); save(); requestDraw();
   }
   async function paneClick(e, s) {
-    const t = e.target; const v = curView(); const g = v.group;
+    const t = e.target; const v = curView(); const g = groupOf(s);
     const sel = t.closest('[data-sel]'); if (sel) return selectMember(sel.dataset.sel);
     const bi = t.closest('[data-best]'); if (bi) { const b = S.best[+bi.dataset.best]; if (g) applyGroupBest(g, b); else { s.pattern.ox = Math.round(b.ox * 10) / 10; s.pattern.oy = Math.round(b.oy * 10) / 10; s.startLabel = b.label; } save(); requestDraw(); renderPane(); toast('Start applied'); return; }
     const sp = t.closest('[data-sp]'); if (sp) { const c = Geo.startCandidates(eff(s), tileOf(s)).special[+sp.dataset.sp]; setOrigin(s, c.o, c.label); renderPane(); toast('Start applied'); return; }
@@ -1079,6 +1310,30 @@
     if (t.closest('[data-dctr]')) { const d = s.doorways[+t.closest('[data-dctr]').dataset.dctr]; const A = s.outline[d.edge], B = s.outline[(d.edge + 1) % s.outline.length]; d.pos = Math.round((Math.hypot(B[0] - A[0], B[1] - A[1]) - d.w) / 2); save(); renderPane(); requestDraw(); return; }
     const p = t.closest('[data-p]')?.dataset.p; if (!p) return;
     const b = Geo.bbox(s.outline);
+    if (p === 'mirrorx' || p === 'mirrory') {
+      const ax = p === 'mirrorx' ? 0 : 1; const bb2 = Geo.bbox(s.outline); const mid = ax === 0 ? bb2.x0 + bb2.x1 : bb2.y0 + bb2.y1;
+      const map = q => ax === 0 ? [mid - q[0], q[1]] : [q[0], mid - q[1]];
+      const old = s.outline.map(q => q.slice());
+      const linkedWalls = allSurfaces().map(x => x.surface).filter(w => w.link && w.link.floorId === s.id).map(w => ({ w, a: map(old[w.link.edge]), b: map(old[(w.link.edge + 1) % old.length]) }));
+      s.outline = Geo.normaliseOutline(old.map(map)).pts.map((q, i, arr) => q); // anticlockwise again
+      const nb = Geo.bbox(old.map(map)); const shift = [-nb.x0, -nb.y0];
+      linkedWalls.forEach(({ w, a, b: b2 }) => { const A = [a[0] + shift[0], a[1] + shift[1]], B = [b2[0] + shift[0], b2[1] + shift[1]]; const i2 = s.outline.findIndex((q, i) => { const r = s.outline[(i + 1) % s.outline.length]; const same = (x, y) => Math.hypot(x[0] - y[0], x[1] - y[1]) < 1; return (same(q, A) && same(r, B)) || (same(q, B) && same(r, A)); }); if (i2 >= 0) w.link.edge = i2; });
+      remapDoorways(s, old, q => { const r = map(q); return [r[0] + shift[0], r[1] + shift[1]]; });
+      linkedWalls.forEach(({ w }) => syncDoors(w, s));
+      resetSigs(); S.cache.clear(); autoStart(s); save(); renderPane(); requestDraw(); toast('Shape flipped'); return;
+    }
+    if (p === 'drawop') { S.calib = S.opTrace = null; S.trace = []; S.traceTarget = 'op'; S.mode = 'move'; setModeButtons(); requestDraw(); toast('Tap round the area that is not tiled, then tap the first point', 3500); return; }
+    if (p === 'openfold') { openView('fold-' + s.id); return; }
+    if (p === 'alignfloor') {
+      const f = findSurface(s.link.floorId).surface; const cf = calc(f); if (!cf.res) return toast('Set up the floor tiles first');
+      const e2 = eff(s); if (+e2.pattern.rotation || ['diagonal', 'herringbone45'].includes(e2.pattern.type)) return toast('Only works when the wall tiles run square');
+      const joints = Geo.floorJointsOnEdge(cf.res, f.outline, s.link.edge, +eff(f).pattern.joint || 0);
+      if (!joints.length) return toast('No floor joints meet this wall');
+      const W = Geo.bbox(s.outline).w; const jc = joints.reduce((a, b) => Math.abs(b - W / 2) < Math.abs(a - W / 2) ? b : a);
+      const ref = Geo.bbox(Geo.buildUnit(tileOf(s), e2.pattern).cells[0].pts); const gw = +e2.pattern.joint || 0;
+      setOrigin(s, [jc + gw / 2 - ref.x0, +e2.pattern.oy], 'Joints lined up with the floor'); renderPane();
+      toast(`Wall joint lined up with the floor joint ${Math.round(jc)} mm from the left`, 3000); return;
+    }
     if (p === 'adddoor') {
       let bi2 = 0, bl = 0; s.outline.forEach((q, i) => { const r = s.outline[(i + 1) % s.outline.length]; const l = Math.hypot(r[0] - q[0], r[1] - q[1]); if (l > bl) { bl = l; bi2 = i; } });
       s.doorways = s.doorways || []; s.doorways.push({ id: Store.uid(), name: 'Doorway', edge: bi2, pos: Math.round((bl - 800) / 2), w: 800 }); save(); renderPane(); requestDraw(); return;
@@ -1104,11 +1359,12 @@
     }
     if (p === 'addv') { const last = s.outline[s.outline.length - 1], first = s.outline[0]; s.outline.push([Math.round((last[0] + first[0]) / 2), Math.round((last[1] + first[1]) / 2)]); }
     if (p === 'norm') { const nn = Geo.normaliseOutline(s.outline); s.outline = nn.pts; s.openings.forEach(o => { o.x += nn.dx; o.y += nn.dy; }); if (s.bg) { s.bg.x += nn.dx; s.bg.y += nn.dy; } if (!groupOf(s)) { s.pattern.ox += nn.dx; s.pattern.oy += nn.dy; } if (s.place) { s.place.x -= nn.dx; s.place.y -= nn.dy; } }
-    if (p === 'newtile') { const t2 = Store.newTile({ name: 'New tile' }); S.job.tiles.push(t2); patternTarget(s).tileId = t2.id; save(); S.cache.clear(); tileModal(t2.id, true); return; }
+    if (p === 'newtile') { addTileModal(t2 => { tileTarget(s).tileId = t2.id; S.cache.clear(); save(); }); return; }
     if (p === 'best') {
       $('#bestList').innerHTML = '<div class="muted">Working…</div>';
       await new Promise(r => setTimeout(r, 30));
-      if (g) { const items = groupItems(g); S.best = Geo.bestForSet(items, tileById(g.tileId), geoSettings(s), g.mode, 6); if (S.best.length) applyGroupBest(g, S.best[0]); }
+      if (!tileOf(s)) { S.best = []; toast('Choose a tile first'); renderPane(); return; }
+      if (g) { S.best = bestForGroup(g, 6); if (S.best.length) applyGroupBest(g, S.best[0]); }
       else { S.best = Geo.findBestStarts(s, tileOf(s), geoSettings(s), 6); if (S.best.length) { const b0 = S.best[0]; s.pattern.ox = Math.round(b0.ox * 10) / 10; s.pattern.oy = Math.round(b0.oy * 10) / 10; s.startLabel = b0.label; } }
       save(); renderPane(); requestDraw(); toast(S.best.length ? 'Best start applied — tap another option to compare' : 'No starts found'); return;
     }
@@ -1141,7 +1397,7 @@
     }
     S.cache.clear(); save(); renderPane(); requestDraw();
   }
-  function fitBg(s) { const img = bgImgFor(s); if (!img || !cv) return; const bg = s.bg; const o = offsets(curView()).get(s.id); const [W, H] = dims(); S.view = Render.makeView(Geo.bbox([[bg.x + o[0], bg.y + o[1]], [bg.x + img.width * bg.mmPerPx + o[0], bg.y - img.height * bg.mmPerPx + o[1]]]), W, H, 20); }
+  function fitBg(s) { const img = bgImgFor(s); if (!img || !cv) return; const bg = s.bg; const o = offsets(curView()).get(s.id); if (rots(curView()).get(s.id)) return; const [W, H] = dims(); S.view = Render.makeView(Geo.bbox([[bg.x + o[0], bg.y + o[1]], [bg.x + img.width * bg.mmPerPx + o[0], bg.y - img.height * bg.mmPerPx + o[1]]]), W, H, 20); }
 
   window.__tso = S; // for testing
   route();

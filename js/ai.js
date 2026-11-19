@@ -25,6 +25,7 @@ Extract every floor area and every wall elevation that is shown, and return ONLY
           "name": "Wall A",
           "kind": "wall",
           "outline": [[0,0],[2400,0],[2400,2400],[0,2400]],
+          "on_floor": {"floor": "Kitchen floor", "x1": 6200, "y1": 3600, "x2": 3800, "y2": 3600},
           "openings": [
             {"type": "window", "name": "Window", "x": 800, "y": 1000, "w": 900, "h": 1000}
           ]
@@ -40,6 +41,7 @@ Rules:
 - "kind" is "wall" or "floor".
 - FLOORS: plan view as drawn, x to the right and y up the page. Use ONE shared coordinate system for every floor area on the same plan (origin at the bottom-left of the whole plan) so neighbouring rooms line up exactly where they meet. List outline corners in order going anticlockwise. Any shape is allowed.
 - DOORWAYS (floors only): every gap in the walls where you walk through — doors, archways, openings into the next room. Give the two ends of the gap (x1,y1 and x2,y2), which must lie on the outline of that floor. Name them by where they lead (e.g. "Door to hall").
+- WALLS: if the plan shows the floor the wall stands on, add "on_floor" with that floor's name and the two ends of the wall's base line in the FLOOR's plan coordinates (x1,y1 = the wall's left end as you face it, x2,y2 = its right end). Leave "on_floor" out if you can't tell.
 - WALLS: draw each elevation as if standing facing it. Origin [0,0] is its bottom-left corner at finished floor level, x to the right, y up. Sloped ceilings or boxing become extra outline points. List a room's walls in order going round the room (A, B, C, D…).
 - "openings" are rectangles given by their bottom-left corner x,y plus width w and height h, in the same coordinates as their surface. Type must be one of: door, window, niche, bath, tray, unit, other.
 - Kitchen units, islands and fitted furniture on a floor are type "unit". Set "tiled_under": true if the floor is likely tiled under them (normal for kitchens unless the drawing says otherwise), false if they are not tiled under. Doors, windows, baths and shower trays are never tiled under.
@@ -66,7 +68,8 @@ Rules:
         if (pts.length < 3) { warnings.push(`${room.name} / ${s.name || 'surface ' + (si + 1)}: outline had fewer than 3 points, skipped.`); return; }
         const n = Geo.normaliseOutline(pts);
         const surf = Store.newSurface(kind, { name: String(s.name || (kind === 'wall' ? `Wall ${si + 1}` : 'Floor')), outline: n.pts, tileId });
-        if (kind === 'floor') surf.place = { x: -n.dx, y: -n.dy };
+        if (kind === 'floor') { surf.place = { x: -n.dx, y: -n.dy }; surf._shift = [n.dx, n.dy]; }
+        if (kind === 'wall' && s.on_floor) surf._onFloor = s.on_floor;
         surf.openings = (s.openings || []).map((o, oi) => {
           const type = TYPES.includes(o.type) ? o.type : 'other';
           return { id: Store.uid(), type, name: String(o.name || o.type || `Opening ${oi + 1}`),
@@ -84,6 +87,17 @@ Rules:
       });
       return room;
     }).filter(r => r.surfaces.length);
+    // link walls to the floor side they stand on
+    const allS = rooms.flatMap(r => r.surfaces);
+    allS.filter(w => w._onFloor).forEach(w => {
+      const of = w._onFloor; const f = allS.find(x => x.kind === 'floor' && x.name === String(of.floor)) || (allS.filter(x => x.kind === 'floor').length === 1 ? allS.find(x => x.kind === 'floor') : null);
+      if (f && [of.x1, of.y1, of.x2, of.y2].every(v => isFinite(+v))) {
+        const sh = f._shift || [0, 0]; const m = Geo.pointToDoorway(f.outline, [+of.x1 + sh[0], +of.y1 + sh[1]], [+of.x2 + sh[0], +of.y2 + sh[1]]);
+        if (m && m.dd < 400) w.link = { floorId: f.id, edge: m.edge }; else warnings.push(`${w.name}: couldn't match it to a side of ${f.name}.`);
+      }
+      delete w._onFloor;
+    });
+    allS.forEach(x => delete x._shift);
     // walls of a room go into one unfolded view with level courses
     const groups = [];
     rooms.forEach(r => { const walls = r.surfaces.filter(s => s.kind === 'wall'); if (walls.length > 1) groups.push(Store.newGroup(`${r.name} — walls`, 'strip', walls.map(w => w.id), tileId, walls[0].pattern)); });

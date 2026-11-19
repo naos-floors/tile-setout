@@ -48,10 +48,11 @@
       bg: null, ...o,
     };
   }
-  function newGroup(name, mode, members, tileId, pattern) { return { id: uid(), name, mode, members, tileId, pattern: { ...pattern } }; }
+  function newGroup(name, mode, members, tileId, pattern) { return { id: uid(), name, mode, members, tileId, pattern: { ...pattern }, lockX: false, lockY: true, tileMode: 'linked' }; }
   /* bring older jobs up to date */
   function migrate(job) {
     job.groups = job.groups || []; job.images = job.images || {};
+    job.groups.forEach(g => { if (g.lockY == null) g.lockY = true; if (g.lockX == null) g.lockX = false; if (!g.tileMode) g.tileMode = 'linked'; });
     job.rooms.forEach(r => r.surfaces.forEach(s => {
       s.doorways = s.doorways || []; s.place = s.place || { x: 0, y: 0 };
       s.settings = s.settings || {}; if (!s.settings.border) s.settings.border = { on: false, tileId: null, rows: 1 };
@@ -61,8 +62,7 @@
   }
   function newRoom(name = 'Room') { return { id: uid(), name, surfaces: [] }; }
   function newJob(name = 'New job') {
-    const t = newTile();
-    return { id: uid(), name, client: '', address: '', notes: '', created: Date.now(), updated: Date.now(), tiles: [t], rooms: [], groups: [], images: {} };
+    return { id: uid(), name, client: '', address: '', notes: '', created: Date.now(), updated: Date.now(), tiles: [], rooms: [], groups: [], images: {} };
   }
 
   const Store = {

@@ -20,8 +20,8 @@
     const LS = o.labelScale || 1;
     // backgrounds
     if (!o.noBg) items.forEach(it => {
-      if (!it.bgImg || !it.surface.bg) return;
-      const b = it.surface.bg; const f = fOf(v, W, H, it.off);
+      if (!it.bgImg || !it.surface.bg || it.rot) return;
+      const b = it.surface.bg; const f = itemF(v, W, H, it);
       const tl = f([b.x, b.y]); const sc = b.mmPerPx * v.s;
       ctx.globalAlpha = b.opacity ?? 0.5; ctx.drawImage(it.bgImg, tl[0], tl[1], it.bgImg.width * sc, it.bgImg.height * sc); ctx.globalAlpha = 1;
     });
@@ -29,7 +29,8 @@
     // edges where two areas meet: no measurement labels (they would sit inside the other area)
     if (items.length > 1) {
       const key = (a, b) => { const k1 = `${Math.round(a[0] / 5)},${Math.round(a[1] / 5)}`, k2 = `${Math.round(b[0] / 5)},${Math.round(b[1] / 5)}`; return k1 < k2 ? k1 + '|' + k2 : k2 + '|' + k1; };
-      const segs = items.map(it => it.surface.outline.map((p, i) => { const q = it.surface.outline[(i + 1) % it.surface.outline.length]; return [[p[0] + it.off[0], p[1] + it.off[1]], [q[0] + it.off[0], q[1] + it.off[1]]]; }));
+      const T = it => { const c = Math.cos(it.rot || 0), sn = Math.sin(it.rot || 0); return p => [p[0] * c - p[1] * sn + it.off[0], p[0] * sn + p[1] * c + it.off[1]]; };
+      const segs = items.map(it => { const t = T(it); return it.surface.outline.map((p, i) => { const q = it.surface.outline[(i + 1) % it.surface.outline.length]; return [t(p), t(q)]; }); });
       const overlaps = (s1, s2) => { // collinear and overlapping
         const d = [s1[1][0] - s1[0][0], s1[1][1] - s1[0][1]]; const L = Math.hypot(d[0], d[1]); if (L < 1) return false;
         const u = [d[0] / L, d[1] / L]; const off = p => Math.abs((p[0] - s1[0][0]) * u[1] - (p[1] - s1[0][1]) * u[0]);
@@ -44,7 +45,9 @@
     // titles for multi-area views
     if (items.length > 1) items.forEach(it => {
       const reg = it.res ? it.res.region : Geo.surfaceRegion(it.surface); if (!reg) return;
-      const f = fOf(v, W, H, it.off); const p = f([(reg.bb.x0 + reg.bb.x1) / 2, reg.bb.y1]);
+      const f = itemF(v, W, H, it);
+      if (it.rot) { const p = f([(reg.bb.x0 + reg.bb.x1) / 2, (reg.bb.y0 + reg.bb.y1) / 2]); ctx.font = `700 ${13 * LS}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; const t = it.surface.name; const tw = ctx.measureText(t).width; ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fillRect(p[0] - tw / 2 - 4, p[1] - 9 * LS, tw + 8, 18 * LS); ctx.fillStyle = it.selected ? C.bronze : C.gun; ctx.fillText(t, p[0], p[1]); return; }
+      const p = f([(reg.bb.x0 + reg.bb.x1) / 2, reg.bb.y1]);
       ctx.font = `700 ${13 * LS}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
       ctx.fillStyle = it.selected ? C.bronze : C.gun; ctx.fillText(it.surface.name, p[0], p[1] - 18 * LS);
     });
@@ -54,7 +57,7 @@
       ctx.beginPath(); ctx.arc(q[0], q[1], 7, 0, 7); ctx.moveTo(q[0] - 12, q[1]); ctx.lineTo(q[0] + 12, q[1]); ctx.moveTo(q[0], q[1] - 12); ctx.lineTo(q[0], q[1] + 12); ctx.stroke();
     });
     const sel = items.find(i => i.selected) || items[0];
-    const fs = sel ? fOf(v, W, H, sel.off) : null;
+    const fs = sel ? itemF(v, W, H, sel) : null;
     if (o.trace && o.trace.length && fs) {
       ctx.strokeStyle = C.blue; ctx.fillStyle = C.blue; ctx.lineWidth = 2;
       ctx.beginPath(); o.trace.forEach((p, i) => { const q = fs(p); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); }); ctx.stroke();
@@ -67,15 +70,21 @@
     }
     ctx.restore();
   }
-  function fOf(v, W, H, off) { const dx = off ? off[0] : 0, dy = off ? off[1] : 0; return p => toS(v, W, H, [p[0] + dx, p[1] + dy]); }
+  function fOf(v, W, H, off, rot) {
+    const dx = off ? off[0] : 0, dy = off ? off[1] : 0;
+    if (!rot) return p => toS(v, W, H, [p[0] + dx, p[1] + dy]);
+    const c = Math.cos(rot), s = Math.sin(rot);
+    return p => toS(v, W, H, [p[0] * c - p[1] * s + dx, p[0] * s + p[1] * c + dy]);
+  }
+  const itemF = (v, W, H, it) => fOf(v, W, H, it.off, it.rot);
 
   function drawItem(ctx, W, H, v, it, o, LS, phase) {
-    const { surface, res } = it; const f = fOf(v, W, H, it.off);
+    const { surface, res } = it; const f = itemF(v, W, H, it);
     const region = res ? res.region : Geo.surfaceRegion(surface); if (!region) return;
     const dim = it.dimmed;
     ctx.save(); if (dim) ctx.globalAlpha = 0.55;
     if (phase === 'fill') {
-    const clipArea = () => { ctx.beginPath(); path(ctx, region.outline, f); region.ops.forEach(op => path(ctx, Geo.rectPts(+op.x, +op.y, +op.w, +op.h), f)); };
+    const clipArea = () => { ctx.beginPath(); path(ctx, region.outline, f); region.ops.forEach(op => path(ctx, Geo.opRing(op), f)); };
     clipArea(); ctx.fillStyle = it.bgImg ? 'rgba(237,237,237,0.35)' : C.bgArea; ctx.fill('evenodd');
     const lw = Math.max(0.5, Math.min(1.2 * LS, v.s * 2));
     if (it.raw && it.raw.length) {
@@ -98,7 +107,7 @@
     // openings (not tiled)
     region.ops.forEach(op => {
       const i = surface.openings.indexOf(op);
-      const pts = Geo.rectPts(+op.x, +op.y, +op.w, +op.h);
+      const pts = Geo.opRing(op);
       ctx.beginPath(); path(ctx, pts, f); ctx.fillStyle = it.bgImg ? 'rgba(255,255,255,0.55)' : C.open; ctx.fill();
       hatch(ctx, f, op, 'rgba(109,110,112,0.35)');
       const sel = it.selected && o.selOpening === i;
@@ -153,16 +162,18 @@
   }
 
   function hatch(ctx, f, op, col) {
-    ctx.save(); ctx.beginPath(); path(ctx, Geo.rectPts(+op.x, +op.y, +op.w, +op.h), f); ctx.clip();
+    const ring = Geo.opRing(op);
+    ctx.save(); ctx.beginPath(); path(ctx, ring, f); ctx.clip();
     ctx.strokeStyle = col; ctx.lineWidth = 1;
-    const a = f([+op.x, +op.y]), b = f([+op.x + +op.w, +op.y + +op.h]);
-    for (let x = a[0] - (a[1] - b[1]); x < b[0]; x += 10) { ctx.beginPath(); ctx.moveTo(x, a[1]); ctx.lineTo(x + (a[1] - b[1]), b[1]); ctx.stroke(); }
+    const sp = ring.map(f); const xs = sp.map(p => p[0]), ys = sp.map(p => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys), h = y1 - y0;
+    for (let x = x0 - h; x < x1; x += 10) { ctx.beginPath(); ctx.moveTo(x, y1); ctx.lineTo(x + h, y0); ctx.stroke(); }
     ctx.restore();
   }
   function opLabel(ctx, f, op, text, col, LS) {
-    const a = f([+op.x, +op.y]), b = f([+op.x + +op.w, +op.y + +op.h]);
-    const w = Math.abs(b[0] - a[0]), h = Math.abs(b[1] - a[1]); if (w < 34 || h < 14) return;
-    const c = f([+op.x + op.w / 2, +op.y + op.h / 2]);
+    const sp = Geo.opRing(op).map(f); const xs = sp.map(p => p[0]), ys = sp.map(p => p[1]);
+    const w = Math.max(...xs) - Math.min(...xs), h = Math.max(...ys) - Math.min(...ys); if (w < 34 || h < 14) return;
+    const c = [(Math.max(...xs) + Math.min(...xs)) / 2, (Math.max(...ys) + Math.min(...ys)) / 2];
     let fs = 12 * LS; ctx.font = `600 ${fs}px ${FONT}`; const tw = ctx.measureText(text).width; if (tw > w - 6) fs *= (w - 6) / tw; if (fs < 7) return;
     ctx.font = `600 ${fs}px ${FONT}`; ctx.fillStyle = col; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, c[0], c[1]);
   }
@@ -246,7 +257,7 @@
 
   function itemsBBox(items) {
     const pts = [];
-    items.forEach(it => { const r = it.res ? it.res.region : Geo.surfaceRegion(it.surface); if (r) [[r.bb.x0, r.bb.y0], [r.bb.x1, r.bb.y1]].forEach(p => pts.push([p[0] + it.off[0], p[1] + it.off[1]])); });
+    items.forEach(it => { const r = it.res ? it.res.region : Geo.surfaceRegion(it.surface); if (!r) return; const c = Math.cos(it.rot || 0), s = Math.sin(it.rot || 0); [[r.bb.x0, r.bb.y0], [r.bb.x1, r.bb.y0], [r.bb.x1, r.bb.y1], [r.bb.x0, r.bb.y1]].forEach(p => pts.push([p[0] * c - p[1] * s + it.off[0], p[0] * s + p[1] * c + it.off[1]])); });
     return Geo.bbox(pts.length ? pts : [[0, 0], [1000, 1000]]);
   }
   /* Render items to an offscreen canvas for export */

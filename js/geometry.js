@@ -130,16 +130,17 @@
   }
 
   // ---------- region ----------
+  function opRing(o) { return o.pts && o.pts.length > 2 ? o.pts.map(p => [+p[0], +p[1]]) : rectPts(+o.x, +o.y, +o.w, +o.h); }
   function surfaceRegion(surface) {
     const outline = stripClose(surface.outline || []);
     if (outline.length < 3) return null;
     let mp = [[outline.concat([outline[0]])]];
     const ops = (surface.openings || []).filter(o => o.w > 0 && o.h > 0 && !o.tiled);
     if (ops.length) {
-      try { mp = PC.difference(mp, ...ops.map(o => [[...rectPts(+o.x, +o.y, +o.w, +o.h), [+o.x, +o.y]]])); } catch (e) { console.warn(e); }
+      try { mp = PC.difference(mp, ...ops.map(o => { const r = opRing(o); return [[...r, r[0]]]; })); } catch (e) { console.warn(e); }
     }
     const units = (surface.openings || []).filter(o => o.w > 0 && o.h > 0 && o.tiled);
-    return { mp, outline, ops, units, bb: bbox(outline), opBoxes: ops.map(o => ({ x0: +o.x, y0: +o.y, x1: +o.x + +o.w, y1: +o.y + +o.h })) };
+    return { mp, outline, ops, units, bb: bbox(outline), opBoxes: ops.map(o => { const b = bbox(opRing(o)); return { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 }; }) };
   }
 
   // ---------- lay tiles ----------
@@ -194,14 +195,15 @@
 
   function ownFrame(pts, totalAng) { const a = -rad(totalAng); return pts.map(p => rot(p, a)); }
 
-  function analysePiece(poly, cell, totalAngDeg, settings) {
+  function analysePiece(poly, cell, totalAngDeg, settings, tb) {
     const outer = stripClose(poly[0]);
     const area = polyArea(poly.map(stripClose));
     const own = ownFrame(outer, totalAngDeg + (cell.ang || 0));
     const b = bbox(own);
     let w = b.w, h = b.h;
     const tileArea = cell.ownW * cell.ownH;
-    const piece = { poly: poly.map(stripClose), area, w, h, kind: 'cut', sizeIdx: cell.sizeIdx, notch: null };
+    const piece = { poly: poly.map(stripClose), area, w, h, kind: 'cut', sizeIdx: cell.sizeIdx, notch: null, tw: cell.ownW, th: cell.ownH };
+    piece.cutSides = tb ? { L: b.x0 > tb.x0 + 0.5, R: b.x1 < tb.x1 - 0.5, B: b.y0 > tb.y0 + 0.5, T: b.y1 < tb.y1 - 0.5 } : { L: true, R: true, B: true, T: true };
     if (area >= tileArea * 0.997) { piece.kind = 'full'; piece.w = cell.ownW; piece.h = cell.ownH; piece.minDim = Math.min(cell.ownW, cell.ownH); return piece; }
     const bbArea = w * h;
     if (poly.length > 1) { piece.kind = 'notch'; piece.notch = { hole: true }; }
@@ -238,7 +240,8 @@
       let res;
       try { res = PC.intersection([[...t.pts, t.pts[0]]], region.mp); } catch (e) { continue; }
       for (const poly of res) {
-        const p = analysePiece(poly, t.cell, totalAng, settings);
+        const tb = bbox(ownFrame(t.pts, totalAng + (t.cell.ang || 0)));
+        const p = analysePiece(poly, t.cell, totalAng, settings, tb);
         if (p.area < 25 || p.minDim < 1) continue; // ignore crumbs (<5×5mm)
         pieces.push(p);
       }
@@ -293,7 +296,7 @@
             const pts = [st.P(x, y), st.P(x + Lb, y), st.P(x + Lb, y + Wb), st.P(x, y + Wb)];
             let res; try { res = PC.intersection([[...pts, pts[0]]], S); } catch (e) { continue; }
             for (const poly of res) {
-              const pc = analysePiece(poly, { ownW: Lb, ownH: Wb, ang: st.ang, sizeIdx: bIdx }, 0, settings);
+              const pc = analysePiece(poly, { ownW: Lb, ownH: Wb, ang: st.ang, sizeIdx: bIdx }, 0, settings, bbox(ownFrame(pts, st.ang)));
               if (pc.area < 25 || pc.minDim < 1) continue; pc.border = true; borderPieces.push(pc);
             }
           }
@@ -383,59 +386,93 @@
       const sg = Math.sign(u[ax]); const thr = B[ax];
       o.forEach(v => { if ((v[ax] - thr) * sg >= -0.5) v[ax] = Math.round((v[ax] + delta * sg) * 10) / 10; });
       const key = ax === 0 ? 'x' : 'y', sz = ax === 0 ? 'w' : 'h';
-      (surface.openings || []).forEach(op => { const c = +op[key] + +op[sz] / 2; if ((c - thr) * sg >= 0) op[key] = Math.round(+op[key] + delta * sg); });
+      (surface.openings || []).forEach(op => { const c = +op[key] + +op[sz] / 2; if ((c - thr) * sg >= 0) { op[key] = Math.round(+op[key] + delta * sg); if (op.pts) op.pts.forEach(q => { q[ax] += delta * sg; }); } });
     } else { o[(i + 1) % n] = [Math.round((B[0] + u[0] * delta) * 10) / 10, Math.round((B[1] + u[1] * delta) * 10) / 10]; }
     return true;
   }
 
   // ---------- counting + offcuts ----------
-  function countTiles(res, settings) {
-    const kerf = settings.kerf ?? 3;
-    const reuse = settings.reuseOffcuts !== false;
-    const minUse = settings.minOffcut ?? 30;
-    const sizes = res.sizes;
-    const per = sizes.map(s => ({ label: s.label, w: s.w, h: s.h, full: 0, cut: 0, notch: 0, fromOffcut: 0, newForCuts: 0, needed: 0 }));
-    const offcuts = sizes.map(() => []);
-    let slivers = 0, minCut = Infinity;
-    const cutsSorted = [], angled = [];
-    res.pieces.forEach((p, idx) => {
-      p.id = idx + 1;
-      const s = per[p.sizeIdx];
-      if (p.kind === 'full') { s.full++; return; }
-      if (p.sliver) slivers++;
-      minCut = Math.min(minCut, p.minDim);
-      if (p.kind === 'cut') { s.cut++; cutsSorted.push(p); } else if (p.kind === 'angled' && reuse) { s.notch++; angled.push(p); } else { s.notch++; s.newForCuts++; p.source = 'new'; }
-    });
-    // angled pieces (diagonal / herringbone edges): two small pieces can usually come from one tile
-    angled.sort((a, b) => b.area - a.area);
-    const bins = [];
-    for (const p of angled) {
-      const cap = sizes[p.sizeIdx].w * sizes[p.sizeIdx].h * 0.92;
-      const bin = p.area <= cap / 2 + 1 ? bins.find(b => b.sizeIdx === p.sizeIdx && b.n === 1 && b.used + p.area <= cap) : null;
-      if (bin) { bin.n++; bin.used += p.area; per[p.sizeIdx].fromOffcut++; p.source = 'offcut'; p.offcutFrom = bin.first; }
-      else { bins.push({ sizeIdx: p.sizeIdx, n: 1, used: p.area, first: p.id }); per[p.sizeIdx].newForCuts++; p.source = 'new'; }
-    }
-    cutsSorted.sort((a, b) => b.w * b.h - a.w * a.h);
-    for (const p of cutsSorted) {
-      const s = per[p.sizeIdx], list = offcuts[p.sizeIdx];
-      const sz = sizes[p.sizeIdx];
-      // piece own dims could be either orientation relative to tile; normalise to tile orientation
-      let pw = p.w, ph = p.h;
-      const TW = Math.max(sz.w, sz.h), TH = Math.min(sz.w, sz.h);
-      if (pw < ph && TW !== TH) { const t = pw; pw = ph; ph = t; }
-      let best = -1, bestA = Infinity;
-      if (reuse) for (let i = 0; i < list.length; i++) { const o = list[i]; if (o.w + 0.5 >= pw && o.h + 0.5 >= ph && o.w * o.h < bestA) { best = i; bestA = o.w * o.h; } }
-      let src;
-      if (best >= 0) { src = list.splice(best, 1)[0]; s.fromOffcut++; p.source = 'offcut'; p.offcutFrom = src.from; }
-      else { src = { w: TW, h: TH, from: p.id }; s.newForCuts++; p.source = 'new'; }
-      const r1 = { w: src.w - pw - kerf, h: src.h, from: src.from }, r2 = { w: pw, h: src.h - ph - kerf, from: src.from };
-      if (r1.w >= minUse && r1.h >= minUse) list.push(r1);
-      if (r2.w >= minUse && r2.h >= minUse) list.push(r2);
-    }
-    let needed = 0, cuts = 0;
-    per.forEach(s => { s.needed = s.full + s.newForCuts; needed += s.needed; cuts += s.cut + s.notch; });
-    return { per, needed, cuts, slivers, minCut: isFinite(minCut) ? minCut : null };
+  /* Works out how many tiles are needed. Cut pieces come from new tiles or from offcuts.
+     A piece's sides that meet other tiles must be factory edges; sides against a wall/opening can be cut edges.
+     Offcuts may be turned 180° (setting). Several res can share one offcut pool (walls round a room). */
+  function fitIn(ow, oh, f, pw, ph, need) {
+    if (pw > ow + 0.5 || ph > oh + 0.5) return null;
+    let px, py;
+    if (need.L && need.R) { if (!(f.L && f.R) || Math.abs(ow - pw) > 1.5) return null; px = 0; }
+    else if (need.L) { if (!f.L) return null; px = 0; }
+    else if (need.R) { if (!f.R) return null; px = ow - pw; }
+    else px = !f.L ? 0 : !f.R ? ow - pw : 0;
+    if (need.B && need.T) { if (!(f.B && f.T) || Math.abs(oh - ph) > 1.5) return null; py = 0; }
+    else if (need.B) { if (!f.B) return null; py = 0; }
+    else if (need.T) { if (!f.T) return null; py = oh - ph; }
+    else py = !f.B ? 0 : !f.T ? oh - ph : 0;
+    return { px: Math.max(0, px), py: Math.max(0, py) };
   }
+  function allocate(resList, settings) {
+    const kerf = settings.kerf ?? 3, reuse = settings.reuseOffcuts !== false, minUse = settings.minOffcut ?? 30, turn = settings.turn180 !== false;
+    const pools = new Map(), pairs = new Map();
+    const out = resList.map(res => ({ per: res.sizes.map(z => ({ label: z.label, w: z.w, h: z.h, full: 0, cut: 0, notch: 0, fromOffcut: 0, newForCuts: 0, needed: 0 })), slivers: 0, minCut: Infinity }));
+    const cuts = [], angled = [];
+    const keyOf = (res, p) => `${res.sizes[p.sizeIdx]?.tile?.id || ''}|${Math.round(p.tw)}x${Math.round(p.th)}`;
+    resList.forEach((res, ri) => res.pieces.forEach((p, idx) => {
+      p.id = idx + 1; p.source = null; p.offcutFrom = null;
+      const st = out[ri], s = st.per[p.sizeIdx];
+      if (p.kind === 'full') { s.full++; return; }
+      if (p.sliver) st.slivers++;
+      st.minCut = Math.min(st.minCut, p.minDim);
+      if (p.kind === 'cut') { s.cut++; cuts.push({ p, ri, key: keyOf(res, p) }); }
+      else if (p.kind === 'angled' && reuse) { s.notch++; angled.push({ p, ri, key: keyOf(res, p) }); }
+      else { s.notch++; s.newForCuts++; p.source = 'new'; }
+    }));
+    cuts.sort((a, b) => b.p.w * b.p.h - a.p.w * a.p.h);
+    const label = (ri, p) => resList.length > 1 ? `${resList[ri].name || 'area ' + (ri + 1)} #${p.id}` : `#${p.id}`;
+    for (const c of cuts) {
+      const p = c.p; if (!pools.has(c.key)) pools.set(c.key, []); const list = pools.get(c.key);
+      const pw = Math.min(p.w, p.tw), ph = Math.min(p.h, p.th);
+      const cs = p.cutSides || { L: true, R: true, B: true, T: true };
+      const need = { L: !cs.L, R: !cs.R, B: !cs.B, T: !cs.T };
+      let best = null;
+      if (reuse) list.forEach((o, i) => {
+        for (const rot of turn ? [0, 180] : [0]) {
+          const f = rot ? { L: o.f.R, R: o.f.L, B: o.f.T, T: o.f.B } : o.f;
+          const fit = fitIn(o.w, o.h, f, pw, ph, need);
+          if (fit && (!best || o.w * o.h < best.area)) best = { i, f, fit, area: o.w * o.h };
+        }
+      });
+      let src, f, fit;
+      if (best) { src = list.splice(best.i, 1)[0]; f = best.f; fit = best.fit; out[c.ri].per[p.sizeIdx].fromOffcut++; p.source = 'offcut'; p.offcutFrom = src.from; }
+      else {
+        src = { w: p.tw, h: p.th, from: label(c.ri, p) }; f = { L: true, R: true, B: true, T: true };
+        fit = fitIn(src.w, src.h, f, pw, ph, need) || { px: 0, py: 0 };
+        out[c.ri].per[p.sizeIdx].newForCuts++; p.source = 'new';
+      }
+      // what is left: strips either side of the piece, then above/below it
+      const ow = src.w, oh = src.h, { px, py } = fit; const left = [];
+      if (px > kerf) left.push({ w: px - kerf, h: oh, f: { L: f.L, R: false, B: f.B, T: f.T } });
+      if (ow - px - pw > kerf) left.push({ w: ow - px - pw - kerf, h: oh, f: { L: false, R: f.R, B: f.B, T: f.T } });
+      const colL = px < 0.5 ? f.L : false, colR = px + pw > ow - 0.5 ? f.R : false;
+      if (py > kerf) left.push({ w: pw, h: py - kerf, f: { L: colL, R: colR, B: f.B, T: false } });
+      if (oh - py - ph > kerf) left.push({ w: pw, h: oh - py - ph - kerf, f: { L: colL, R: colR, B: false, T: f.T } });
+      left.forEach(o => { if (o.w >= minUse && o.h >= minUse) list.push({ ...o, from: src.from }); });
+    }
+    // angled pieces (diagonal / herringbone edges): two small pieces can usually come from one tile
+    angled.sort((a, b) => b.p.area - a.p.area);
+    for (const c of angled) {
+      const p = c.p; if (!pairs.has(c.key)) pairs.set(c.key, []); const bins = pairs.get(c.key);
+      const cap = p.tw * p.th * 0.92;
+      const bin = p.area <= cap / 2 + 1 ? bins.find(b => b.n === 1 && b.used + p.area <= cap) : null;
+      if (bin) { bin.n++; bin.used += p.area; out[c.ri].per[p.sizeIdx].fromOffcut++; p.source = 'offcut'; p.offcutFrom = bin.first; }
+      else { bins.push({ n: 1, used: p.area, first: label(c.ri, p) }); out[c.ri].per[p.sizeIdx].newForCuts++; p.source = 'new'; }
+    }
+    return out.map(st => {
+      let needed = 0, cutsN = 0;
+      st.per.forEach(z => { z.needed = z.full + z.newForCuts; needed += z.needed; cutsN += z.cut + z.notch; });
+      return { per: st.per, needed, cuts: cutsN, slivers: st.slivers, minCut: isFinite(st.minCut) ? st.minCut : null };
+    });
+  }
+  function countTiles(res, settings) { return allocate([res], settings)[0]; }
+  /* share offcuts between several areas (e.g. walls of one room); updates each res.stats */
+  function poolTiles(resList, settings) { const sts = allocate(resList, settings); resList.forEach((r, i) => { r.stats = sts[i]; }); return sts; }
 
   // ---------- cut list grouping ----------
   function cutList(res) {
@@ -451,8 +488,8 @@
         else desc += ` (${p.notch.count} notches)`;
       }
       if (p.kind === 'angled') { const sd = (p.sides || []).join(' · '); desc = `angled, sides ${sd}`; key += '|' + sd; }
-      if (!groups.has(key)) groups.set(key, { sizeIdx: p.sizeIdx, kind: p.kind, w, h, desc, count: 0, sliver: false, ids: [], offcut: 0 });
-      const g = groups.get(key); g.count++; g.ids.push(p.id); if (p.sliver) g.sliver = true; if (p.source === 'offcut') g.offcut++;
+      if (!groups.has(key)) groups.set(key, { sizeIdx: p.sizeIdx, kind: p.kind, w, h, desc, count: 0, sliver: false, ids: [], offcut: 0, from: [] });
+      const g = groups.get(key); g.count++; g.ids.push(p.id); if (p.sliver) g.sliver = true; if (p.source === 'offcut') { g.offcut++; if (p.offcutFrom && !g.from.includes(p.offcutFrom)) g.from.push(p.offcutFrom); }
     }
     return [...groups.values()].sort((a, b) => a.sizeIdx - b.sizeIdx || b.w * b.h - a.w * a.h);
   }
@@ -578,6 +615,34 @@
   }
 
   function toAreaOrigin(xp, yp, a) { return rot([xp, yp], a); }
+
+  /* Joint centres where floor joints meet floor edge i, measured as a wall would see them: from P(i+1) back towards P(i) */
+  function floorJointsOnEdge(floorRes, outline, i, g) {
+    const n = outline.length, A = outline[i], B = outline[(i + 1) % n];
+    const len = Math.hypot(B[0] - A[0], B[1] - A[1]); if (len < 1) return [];
+    const u = [(B[0] - A[0]) / len, (B[1] - A[1]) / len];
+    const hits = [];
+    for (const t of floorRes.rawTiles) {
+      const pts = t.pts;
+      for (let k = 0; k < pts.length; k++) {
+        const P = pts[k], Q = pts[(k + 1) % pts.length];
+        const d = [Q[0] - P[0], Q[1] - P[1]]; const den = d[0] * u[1] - d[1] * u[0];
+        if (Math.abs(den) < 1e-9) continue; // parallel to the wall
+        // intersection of segment PQ with the edge line
+        const s1 = ((A[0] - P[0]) * u[1] - (A[1] - P[1]) * u[0]) / den;
+        if (s1 < -1e-6 || s1 > 1 + 1e-6) continue;
+        const X = [P[0] + d[0] * s1, P[1] + d[1] * s1];
+        const tt = (X[0] - A[0]) * u[0] + (X[1] - A[1]) * u[1];
+        if (tt < -1 || tt > len + 1) continue;
+        hits.push(len - tt);
+      }
+    }
+    hits.sort((a, b) => a - b);
+    const joints = [];
+    for (let k = 0; k < hits.length - 1; k++) { const gap = hits[k + 1] - hits[k]; if (gap > 0.05 && Math.abs(gap - g) < Math.max(0.6, g * 0.6)) joints.push((hits[k] + hits[k + 1]) / 2); }
+    if (!g) { const seen = []; hits.forEach(h => { if (!seen.some(x => Math.abs(x - h) < 0.5)) seen.push(h); }); return seen; }
+    return joints;
+  }
 
   // point on the centre of the straight joint line through the V points, and the direction of that line (pattern frame)
   function herringboneAxis(tile, pat) {
@@ -736,5 +801,5 @@
     return { pts: p, dx: -b.x0, dy: -b.y0 };
   }
 
-  window.Geo = { PATTERNS, buildUnit, layTiles, layout, setoutRef, bestForSet, stretchEdge, doorwayPts, pointToDoorway, herringboneAxis, pointInRing, cutList, materials, findBestStarts, startCandidates, toAreaOrigin, surfaceRegion, patternRotation, wallsToOutline, outlineToWalls, normaliseOutline, bbox, rectPts, ringArea, perimeter, polyArea, mpArea, rot, rad, stripClose };
+  window.Geo = { PATTERNS, buildUnit, layTiles, layout, poolTiles, opRing, floorJointsOnEdge, setoutRef, bestForSet, stretchEdge, doorwayPts, pointToDoorway, herringboneAxis, pointInRing, cutList, materials, findBestStarts, startCandidates, toAreaOrigin, surfaceRegion, patternRotation, wallsToOutline, outlineToWalls, normaliseOutline, bbox, rectPts, ringArea, perimeter, polyArea, mpArea, rot, rad, stripClose };
 })();
