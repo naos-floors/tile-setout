@@ -16,7 +16,7 @@
     return new Promise((res, rej) => {
       const t = d.transaction('jobs', mode); const s = t.objectStore('jobs');
       const out = fn(s);
-      t.oncomplete = () => res(out && out.result !== undefined ? out.result : out);
+      t.oncomplete = () => res(out instanceof IDBRequest ? out.result : out);
       t.onerror = () => rej(t.error);
     });
   }
@@ -26,7 +26,7 @@
     adhName: 'Ardex X7R', adhCoverage: 2.2, adhBagKg: 20, adhExtra: 0,
     groutName: 'Ardex grout', groutDensity: 1.6, groutBagKg: 5, groutExtra: 10,
     primerName: 'Ardex primer', primerLPerM2: 0.15, primerUnitL: 5,
-    trimLengthM: 2.5, spacersPerTile: 3, spacerPack: 100,
+    trimLengthM: 2.5, spacersPerTile: 3, spacerPack: 100, spareDefault: 10,
   };
   const DEFAULT_SETTINGS = { sliver: 50, kerf: 3, minOffcut: 30, reuseOffcuts: true, apiKey: '', model: 'claude-sonnet-5-5', mat: DEFAULT_MAT };
 

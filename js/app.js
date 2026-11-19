@@ -67,8 +67,9 @@
   const cornerAllow = () => +S.settings.kerf || 3;
   function borderTileOf(s) { const b = s.settings.border; return b && b.on ? tileById(b.tileId) : null; }
   /* the surface as the engine should see it: group pattern applied in the area's own coordinates */
+  const separate = g => g && g.tileMode === 'separate';
   function eff(s) {
-    const g = groupOf(s); if (!g) return s;
+    const g = groupOf(s); if (!g || separate(g)) return s;
     const pl = s.place || { x: 0, y: 0 };
     let pattern;
     if (g.mode === 'strip') {
@@ -183,7 +184,7 @@
   function toLocal(v, s, w) { const o = offsets(v).get(s.id), r = rots(v).get(s.id) || 0; return Geo.rot([w[0] - o[0], w[1] - o[1]], -r); }
   function toWorld(v, s, p) { const o = offsets(v).get(s.id), r = rots(v).get(s.id) || 0; const q = Geo.rot(p, r); return [q[0] + o[0], q[1] + o[1]]; }
   function cur() { const v = curView(); if (!v) return {}; return v.members.find(m => m.surface.id === S.selId) || v.members[0] || {}; }
-  function patternTarget(s) { const g = groupOf(s); return g || s; }
+  function patternTarget(s) { const g = groupOf(s); return g && !separate(g) ? g : s; }
 
   // ---------- files ----------
   // iPhone/iPad home-screen apps can't save downloads, so they use the share sheet (Save to Files). Everything else downloads.
@@ -305,11 +306,11 @@
           <div class="note">Default: Ardex X7R at about 2.2 m² per 20 kg bag. A tile can override this (e.g. large format with back-buttering).</div></div>
         <div class="card"><h2>Grout</h2><div class="grid">${f('groutName', 'Product', 'text')}${f('groutDensity', 'Density (kg/L)')}${f('groutBagKg', 'Bag size kg')}${f('groutExtra', 'Extra %')}</div>
           <div class="note">Worked out from joint length × joint width × tile thickness × density, so it follows every tile size and pattern. Check density and bag size against the Ardex data sheet for the grout you use.</div></div>
-        <div class="card"><h2>Primer, trim and spacers</h2><div class="grid">${f('primerName', 'Primer', 'text')}${f('primerLPerM2', 'Primer litres per m²')}${f('primerUnitL', 'Primer container (L)')}${f('trimLengthM', 'Trim length (m)')}${f('spacersPerTile', 'Spacers/clips per tile')}${f('spacerPack', 'Spacers per pack')}</div></div>
+        <div class="card"><h2>Primer, trim and spacers</h2><div class="grid">${f('primerName', 'Primer', 'text')}${f('primerLPerM2', 'Primer litres per m²')}${f('primerUnitL', 'Primer container (L)')}${f('spareDefault', 'Waste / spare % (default)')}${f('trimLengthM', 'Trim length (m)')}${f('spacersPerTile', 'Spacers/clips per tile')}${f('spacerPack', 'Spacers per pack')}</div></div>
         <div class="card"><h2>Automatic drawing reading (optional)</h2>
           <div class="grid">${f('apiKey', 'Anthropic API key', 'password', 'g', 'autocomplete="off" placeholder="sk-ant-…"')}${f('model', 'Model', 'text', 'g')}</div>
           <div class="note">Only needed for the in-app <b>Read drawing</b> button, which only works with signal. The key is stored on this device only. Without a key you can send a drawing to Claude with the ready-made prompt and paste the reply in.</div></div>
-        <div class="note">Version 1.2 · Naos Floors internal tool. Quantities are a guide: always check on site and follow BS 5385 and manufacturers’ instructions.</div>
+        <div class="note">Version 1.3 · Naos Floors internal tool. Quantities are a guide: always check on site and follow BS 5385 and manufacturers’ instructions.</div>
       </div></div>`;
     app.onclick = e => { if (e.target.closest('[data-a="back"]')) history.length > 1 ? history.back() : location.hash = ''; };
     app.oninput = e => {
@@ -597,7 +598,7 @@
   const r10 = v => Math.round(v * 10) / 10;
   function applyGroupBest(g, b) {
     const items = groupItems(g);
-    if (b.walls) { b.walls.forEach((w, i) => { const s = items[i].real; if (g.lockX) { /* not used */ } s.pattern.ox = r10(w.ox); if (g.lockY !== false) g.pattern.oy = r10(w.oy); else s.pattern.oy = r10(w.oy); }); }
+    if (b.walls) { b.walls.forEach((w, i) => { const s = items[i].real; s.pattern.ox = r10(w.ox); if (g.lockY !== false && !separate(g)) g.pattern.oy = r10(w.oy); else s.pattern.oy = r10(w.oy); }); }
     else if (g.mode === 'strip') { g.pattern.ox = r10(b.ox); if (g.lockY !== false) g.pattern.oy = r10(b.oy); else items.forEach(it => { it.real.pattern.oy = r10(b.oy); }); }
     else { g.pattern.ox = r10(b.ox); g.pattern.oy = r10(b.oy); }
     g.startLabel = b.label; S.cache.clear();
@@ -606,24 +607,34 @@
     const items = groupItems(g); const t = tileOf(items[0].real); if (!t) return [];
     const gs = geoSettings(items[0].real);
     if (g.mode === 'strip' && g.lockX) return Geo.bestForSet(items, t, gs, 'plan', top);
-    if (g.mode === 'strip' && g.lockY === false) { // each wall on its own
-      const walls = items.map(it => { const b = Geo.findBestStarts({ ...it.real, pattern: eff(it.real).pattern }, tileOf(it.real), geoSettings(it.real), 1)[0]; return b ? { ox: b.ox, oy: b.oy, stats: b.stats } : null; });
+    if (separate(g) || (g.mode === 'strip' && g.lockY === false)) { // each area on its own
+      const walls = items.map(it => { const tt = tileOf(it.real); const b = tt ? Geo.findBestStarts({ ...it.real, pattern: eff(it.real).pattern }, tt, geoSettings(it.real), 1)[0] : null; return b ? { ox: b.ox, oy: b.oy, stats: b.stats } : null; });
       if (walls.some(w => !w)) return [];
       const st = walls.reduce((a, w) => ({ slivers: a.slivers + w.stats.slivers, needed: a.needed + w.stats.needed, cuts: a.cuts + w.stats.cuts, minCut: Math.min(a.minCut, w.stats.minCut ?? Infinity) }), { slivers: 0, needed: 0, cuts: 0, minCut: Infinity });
       if (!isFinite(st.minCut)) st.minCut = null;
-      return [{ label: 'Best for each wall on its own', walls, stats: st }];
+      return [{ label: `Best for each ${g.mode === 'strip' ? 'wall' : 'area'} on its own`, walls, stats: st }];
     }
-    if (g.tileMode === 'separate' && g.mode === 'strip') return Geo.bestForSet(items.filter(it => tileOf(it.real)?.id === t.id), t, gs, g.mode, top);
     return Geo.bestForSet(items, t, gs, g.mode, top);
   }
   function autoStartGroup(g) { try { const b = bestForGroup(g, 1)[0]; if (b) applyGroupBest(g, b); } catch (e) { console.warn(e); } }
 
-  // ---------- walls linked to floor sides ----------
+  // ---------- walls linked to floor sides: one model, kept in step ----------
   function edgeLen(f, i) { const o = f.outline, A = o[i], B = o[(i + 1) % o.length]; return A && B ? Math.hypot(B[0] - A[0], B[1] - A[1]) : 0; }
   function bottomEdge(w) { const o = w.outline, y0 = Math.min(...o.map(p => p[1])); let bi = -1, bl = 0; o.forEach((p, i) => { const q = o[(i + 1) % o.length]; if (Math.abs(p[1] - y0) < 0.5 && Math.abs(q[1] - y0) < 0.5) { const l = Math.abs(q[0] - p[0]); if (l > bl) { bl = l; bi = i; } } }); return bi; }
-  const sigOf = s => JSON.stringify([s.outline, s.link || null, (s.openings || []).filter(o => o.type === 'door').map(o => [o.id, o.x, o.w])]);
-  function resetSigs() { S.sigs = new Map(); S.prevOutlines = new Map(); if (S.job) allSurfaces().forEach(({ surface }) => { S.sigs.set(surface.id, sigOf(surface)); S.prevOutlines.set(surface.id, JSON.parse(JSON.stringify(surface.outline))); }); }
-  /* after a floor's shape is replaced, keep each wall on the matching side (same direction, nearest) */
+  const roomOf = s => S.job.rooms.find(r => r.surfaces.includes(s));
+  const wallsOn = f => allSurfaces().map(x => x.surface).filter(w => w.kind === 'wall' && w.link && w.link.floorId === f.id);
+  const wallOnEdge = (f, e) => wallsOn(f).find(w => w.link.edge === e) || null;
+  const sigOf = s => JSON.stringify([s.outline, s.link || null, s.openings, s.doorways || []]);
+  function resetSigs() {
+    S.sigs = new Map(); S.prevOutlines = new Map(); S.snapItems = new Map();
+    if (!S.job) return;
+    allSurfaces().forEach(({ surface }) => {
+      S.sigs.set(surface.id, sigOf(surface)); S.prevOutlines.set(surface.id, JSON.parse(JSON.stringify(surface.outline)));
+      (surface.openings || []).forEach(o => S.snapItems.set(o.id, JSON.stringify([o.x, o.y, o.w, o.h])));
+      (surface.doorways || []).forEach(d => S.snapItems.set(d.id, JSON.stringify([d.edge, d.pos, d.w])));
+    });
+  }
+  const moved = (id, now) => !S.snapItems.has(id) || S.snapItems.get(id) !== JSON.stringify(now);
   function remapDoorways(f, old, mapPt = q => q) {
     (f.doorways || []).forEach(d => {
       const pts = Geo.doorwayPts({ outline: old }, d); if (!pts) return;
@@ -632,63 +643,162 @@
   }
   function remapLinks(f, old) {
     remapDoorways(f, old);
-    const walls = allSurfaces().map(x => x.surface).filter(w => w.kind === 'wall' && w.link && w.link.floorId === f.id);
     const o = f.outline;
-    walls.forEach(w => {
+    wallsOn(f).forEach(w => {
       const A = old[w.link.edge], B = old[(w.link.edge + 1) % old.length]; if (!A || !B) return;
       const L = Math.hypot(B[0] - A[0], B[1] - A[1]) || 1; const u = [(B[0] - A[0]) / L, (B[1] - A[1]) / L]; const m = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
       let best = -1, bd = Infinity;
-      o.forEach((P, i) => { const Q = o[(i + 1) % o.length]; const l = Math.hypot(Q[0] - P[0], Q[1] - P[1]); if (l < 1) return; const dot = ((Q[0] - P[0]) * u[0] + (Q[1] - P[1]) * u[1]) / l; if (dot < 0.99) return; const d = Math.hypot((P[0] + Q[0]) / 2 - m[0], (P[1] + Q[1]) / 2 - m[1]); if (d < bd) { bd = d; best = i; } });
-      if (best >= 0) w.link.edge = best; else delete w.link;
+      o.forEach((P, i) => { const Q = o[(i + 1) % o.length]; const l = Math.hypot(Q[0] - P[0], Q[1] - P[1]); if (l < 1) return; const dot = ((Q[0] - P[0]) * u[0] + (Q[1] - P[1]) * u[1]) / l; if (dot < 0.99) return; if (wallsOn(f).some(x => x !== w && x.link.edge === i && x._mapped)) return; const d = Math.hypot((P[0] + Q[0]) / 2 - m[0], (P[1] + Q[1]) / 2 - m[1]); if (d < bd) { bd = d; best = i; } });
+      if (best >= 0) { w.link.edge = best; w._mapped = true; } else { delete w.link; toast(`${w.name} no longer matches a side of ${f.name} — delete it if it isn't needed`, 4000); }
     });
+    wallsOn(f).forEach(w => delete w._mapped);
   }
-  /* keep walls and the floor they stand on the same length; wall doors become floor doorways */
+  function nextWallName(room) { const used = room.surfaces.filter(x => x.kind === 'wall').map(x => (/^Wall ([A-Z])$/.exec(x.name) || [])[1]).filter(Boolean); for (let c = 65; c < 91; c++) { const l = String.fromCharCode(c); if (!used.includes(l)) return `Wall ${l}`; } return 'Wall'; }
+  /* floor gained sides: make walls for them, matching the existing walls */
+  function addMissingWalls(f) {
+    const ws = wallsOn(f); if (!ws.length) return false;
+    const room = roomOf(f); const H = Math.max(...ws.map(w => Geo.bbox(w.outline).h)); let did = false;
+    for (let e = 0; e < f.outline.length; e++) {
+      if (wallOnEdge(f, e)) continue;
+      const L = Math.round(edgeLen(f, e)); if (L < 20) continue;
+      const w = Store.newSurface('wall', { name: nextWallName(room), outline: [[0, 0], [L, 0], [L, H], [0, H]], tileId: ws[0].tileId, link: { floorId: f.id, edge: e } });
+      w.pattern = { ...ws[0].pattern };
+      room.surfaces.push(w); did = true;
+      const g = groupOf(ws[0]); if (g) g.members.push(w.id);
+      toast(`${w.name} added for the new side of ${f.name}`, 3000);
+    }
+    orderGroupRound(f);
+    return did;
+  }
+  /* walls in an unfolded view follow the floor sides going round the room */
+  function orderGroupRound(f) {
+    const ws = wallsOn(f); const g = ws.length ? groupOf(ws[0]) : null; if (!g || g.mode !== 'strip') return;
+    const first = findSurface(g.members[0]).surface; const start = first && first.link && first.link.floorId === f.id ? first.link.edge : 0; const n = f.outline.length;
+    const linked = g.members.map(id => findSurface(id).surface).filter(w => w && w.link && w.link.floorId === f.id).sort((a, b) => ((a.link.edge - start + n) % n) - ((b.link.edge - start + n) % n));
+    const others = g.members.filter(id => !linked.some(w => w.id === id));
+    g.members = [...linked.map(w => w.id), ...others];
+  }
+  /* link walls to floor sides when it's obvious (same length, side free) */
+  function autoLink(room) {
+    const floors = room.surfaces.filter(x => x.kind === 'floor'); if (floors.length !== 1) return false;
+    const f = floors[0]; let did = false; let last = -1;
+    room.surfaces.filter(x => x.kind === 'wall').forEach(w => {
+      if (w.link) { if (w.link.floorId === f.id) last = w.link.edge; return; }
+      const W = Geo.bbox(w.outline).w; const n = f.outline.length;
+      const free = [...Array(n).keys()].filter(e => !wallOnEdge(f, e) && Math.abs(edgeLen(f, e) - W) <= 2);
+      if (!free.length) return;
+      const pick = free.length === 1 ? free[0] : free.sort((a, b) => ((a - last - 1 + n) % n) - ((b - last - 1 + n) % n))[0];
+      w.link = { floorId: f.id, edge: pick }; last = pick; did = true;
+    });
+    return did;
+  }
+  // a wall door and its floor doorway are one thing
+  function syncDoors(f) {
+    let did = false; f.doorways = f.doorways || [];
+    const ws = wallsOn(f);
+    const allDoors = ws.flatMap(w => (w.openings || []).filter(o => o.type === 'door').map(o => ({ o, w })));
+    // doorways (floor) first
+    f.doorways = f.doorways.filter(d => {
+      const pair = d.fromOp ? allDoors.find(x => x.o.id === d.fromOp) : null;
+      const wall = wallOnEdge(f, d.edge);
+      if (d.fromOp && !pair) { did = true; return false; }          // door deleted on the wall
+      if (!wall) { if (pair) { pair.w.openings = pair.w.openings.filter(o => o !== pair.o); d.fromOp = null; did = true; } return true; }
+      const L = edgeLen(f, d.edge);
+      if (pair && pair.w !== wall) { pair.w.openings = pair.w.openings.filter(o => o !== pair.o); const no = { ...pair.o, x: Math.round(L - d.pos - d.w) }; wall.openings.push(no); did = true; return true; }
+      if (!pair) { const no = { id: Store.uid(), type: 'door', name: d.name || 'Door', x: Math.round(L - d.pos - d.w), y: 0, w: Math.round(d.w), h: 1981, paired: true }; wall.openings.push(no); d.fromOp = no.id; did = true; return true; }
+      const wantX = Math.round(L - d.pos - d.w);
+      if (Math.round(pair.o.x) !== wantX || Math.round(pair.o.w) !== Math.round(d.w)) {
+        if (moved(pair.o.id, [pair.o.x, pair.o.y, pair.o.w, pair.o.h]) && !moved(d.id, [d.edge, d.pos, d.w])) { d.pos = Math.round(L - pair.o.x - pair.o.w); d.w = +pair.o.w; }
+        else { pair.o.x = wantX; pair.o.w = Math.round(d.w); }
+        did = true;
+      }
+      pair.o.paired = true; return true;
+    });
+    // wall doors with no doorway yet (or doorway deleted on the floor)
+    allDoors.forEach(({ o, w }) => {
+      if (f.doorways.some(d => d.fromOp === o.id)) return;
+      if (o.paired) { w.openings = w.openings.filter(x => x !== o); did = true; return; }
+      const L = edgeLen(f, w.link.edge);
+      f.doorways.push({ id: Store.uid(), name: o.name || 'Door', edge: w.link.edge, pos: Math.round(L - o.x - o.w), w: Math.round(+o.w), fromOp: o.id }); o.paired = true; did = true;
+    });
+    return did;
+  }
+  // baths and shower trays on the floor stand against walls: they show on those walls with their height
+  const ELEV = { bath: 560, tray: 50 };
+  function syncFixtures(f) {
+    let did = false; const ws = wallsOn(f);
+    const fixtures = (f.openings || []).filter(o => (o.type === 'bath' || o.type === 'tray') && !o.tiled);
+    ws.forEach(w => {
+      const e = w.link.edge, o = f.outline, A = o[e], B = o[(e + 1) % o.length]; const L = edgeLen(f, e); if (L < 1) return;
+      const u = [(B[0] - A[0]) / L, (B[1] - A[1]) / L], n = [-u[1], u[0]]; // inward for anticlockwise floors
+      const sign = Geo.ringArea(o) >= 0 ? 1 : -1;
+      fixtures.forEach(fx => {
+        const pts = Geo.opRing(fx).map(p => [(p[0] - A[0]) * u[0] + (p[1] - A[1]) * u[1], ((p[0] - A[0]) * n[0] + (p[1] - A[1]) * n[1]) * sign]);
+        const t0 = Math.max(0, Math.min(...pts.map(q => q[0]))), t1 = Math.min(L, Math.max(...pts.map(q => q[0]))); const dmin = Math.min(...pts.map(q => q[1]));
+        let wop = (w.openings || []).find(x => x.fromFloorOp === fx.id);
+        const touching = dmin <= 25 && t1 - t0 > 50;
+        if (!touching) { if (wop) { w.openings = w.openings.filter(x => x !== wop); did = true; } return; }
+        const h = fx.elev || ELEV[fx.type]; const want = { x: Math.round(L - t1), w: Math.round(t1 - t0), h: Math.round(h) };
+        if (!wop) {
+          if ((fx.elevWalls || []).includes(w.id)) { f.openings = f.openings.filter(x => x !== fx); did = true; return; } // removed on the wall: remove from the floor too
+          wop = { id: Store.uid(), type: fx.type, name: fx.name, x: want.x, y: 0, w: want.w, h: want.h, fromFloorOp: fx.id }; w.openings.push(wop); fx.elevWalls = [...(fx.elevWalls || []), w.id]; did = true; return;
+        }
+        if (wop.x !== want.x || wop.w !== want.w || wop.h !== want.h) {
+          if (moved(wop.id, [wop.x, wop.y, wop.w, wop.h]) && !moved(fx.id, [fx.x, fx.y, fx.w, fx.h])) {
+            const shift = (L - wop.x - wop.w) - t0; // slide the fixture along the wall
+            fx.x = Math.round(+fx.x + u[0] * shift); fx.y = Math.round(+fx.y + u[1] * shift); fx.elev = wop.h;
+            if (Math.abs(wop.w - want.w) > 1) { if (Math.abs(u[0]) > 0.99) fx.w = Math.round(wop.w); else if (Math.abs(u[1]) > 0.99) fx.h = Math.round(wop.w); }
+          } else { wop.x = want.x; wop.w = want.w; wop.h = want.h; wop.y = 0; }
+          did = true;
+        }
+        if (wop.name !== fx.name) wop.name = fx.name;
+      });
+      // wall fixtures whose floor fixture has gone
+      const before = w.openings.length; w.openings = w.openings.filter(x => !x.fromFloorOp || fixtures.some(fx => fx.id === x.fromFloorOp)); if (w.openings.length !== before) did = true;
+    });
+    return did;
+  }
+  /* keep every linked thing in step after any change (runs on every save) */
   function syncLinks() {
     if (!S.job || !S.sigs) return false;
     const surfs = allSurfaces().map(x => x.surface);
-    const changed = surfs.filter(s => S.sigs.has(s.id) && S.sigs.get(s.id) !== sigOf(s));
+    const changed = surfs.filter(s => S.sigs.get(s.id) !== sigOf(s));
+    if (!changed.length) return false;
     let did = false; const floors = new Set();
+    // new rooms/areas: link where obvious
+    S.job.rooms.forEach(r => { if (r.surfaces.some(x => changed.includes(x)) && autoLink(r)) did = true; });
     changed.filter(s => s.kind === 'wall' && s.link).forEach(w => {
       const f = findSurface(w.link.floorId).surface; if (!f || w.link.edge >= f.outline.length) return;
+      floors.add(f.id);
+      const prevW = S.prevOutlines.get(w.id); if (!prevW) return;
       const L = edgeLen(f, w.link.edge), W = Geo.bbox(w.outline).w;
-      if (Math.abs(L - W) > 0.5) { Geo.stretchEdge(f, w.link.edge, W); did = true; floors.add(f.id); }
-      if (syncDoors(w, f)) did = true;
+      if (Math.abs(L - W) > 0.5 && Math.abs(Geo.bbox(prevW).w - W) > 0.5) { Geo.stretchEdge(f, w.link.edge, W); did = true; }
     });
     changed.filter(s => s.kind === 'floor').forEach(f => {
-      const old = S.prevOutlines && S.prevOutlines.get(f.id);
-      if (old && old.length !== f.outline.length) { remapLinks(f, old); did = true; }
+      const old = S.prevOutlines.get(f.id);
+      if (old && old.length !== f.outline.length) { remapLinks(f, old); if (f.outline.length > old.length && addMissingWalls(f)) did = true; did = true; }
       floors.add(f.id);
     });
     floors.forEach(fid => {
       const f = findSurface(fid).surface; if (!f) return;
-      surfs.filter(w => w.kind === 'wall' && w.link && w.link.floorId === fid && !changed.includes(w) && w.link.edge < f.outline.length).forEach(w => {
+      wallsOn(f).filter(w => w.link.edge < f.outline.length).forEach(w => {
         const L = edgeLen(f, w.link.edge), W = Geo.bbox(w.outline).w;
         if (Math.abs(L - W) > 0.5) { const bi = bottomEdge(w); if (bi >= 0) { Geo.stretchEdge(w, bi, edgeLen(w, bi) + (L - W)); did = true; } }
-        if (syncDoors(w, f)) did = true;
       });
+      for (let k = 0; k < 3; k++) { const d1 = syncDoors(f), d2 = syncFixtures(f); if (!d1 && !d2) break; did = true; S.snapItems = new Map(); allSurfaces().forEach(({ surface: x }) => { (x.openings || []).forEach(o => S.snapItems.set(o.id, JSON.stringify([o.x, o.y, o.w, o.h]))); (x.doorways || []).forEach(d => S.snapItems.set(d.id, JSON.stringify([d.edge, d.pos, d.w]))); }); }
     });
-    surfs.forEach(s => { S.sigs.set(s.id, sigOf(s)); S.prevOutlines.set(s.id, JSON.parse(JSON.stringify(s.outline))); });
+    resetSigs();
     if (did) S.cache.clear();
     return did;
   }
-  function syncDoors(w, f) {
-    let did = false; const L = edgeLen(f, w.link.edge); f.doorways = f.doorways || [];
-    const doors = (w.openings || []).filter(o => o.type === 'door');
-    doors.forEach(o => {
-      const pos = Math.round(L - (+o.x + +o.w)); let d = f.doorways.find(x => x.fromOp === o.id);
-      if (!d) { d = { id: Store.uid(), name: `${o.name || 'Door'} (${w.name})`, edge: w.link.edge, pos, w: +o.w, fromOp: o.id, fromWall: w.id }; f.doorways.push(d); did = true; }
-      else if (d.pos !== pos || d.w !== +o.w || d.edge !== w.link.edge) { d.pos = pos; d.w = +o.w; d.edge = w.link.edge; did = true; }
-    });
-    const before = f.doorways.length;
-    f.doorways = f.doorways.filter(d => d.fromWall !== w.id || doors.some(o => o.id === d.fromOp));
-    return did || before !== f.doorways.length;
-  }
   function linkWall(w, floorId, edge) {
-    if (!floorId) { delete w.link; return; }
+    if (!floorId) { delete w.link; resetSigs(); return true; }
+    const f = findSurface(floorId).surface; const other = wallOnEdge(f, +edge);
+    if (other && other !== w) { toast(`${other.name} is already on that side — unlink it first`, 3500); return false; }
     w.link = { floorId, edge: +edge };
-    const f = findSurface(floorId).surface; const L = edgeLen(f, +edge), W = Geo.bbox(w.outline).w;
+    const L = edgeLen(f, +edge), W = Geo.bbox(w.outline).w;
     if (Math.abs(L - W) > 0.5) { const bi = bottomEdge(w); if (bi >= 0) Geo.stretchEdge(w, bi, edgeLen(w, bi) + (L - W)); }
-    syncDoors(w, f); resetSigs(); S.cache.clear();
+    syncDoors(f); syncFixtures(f); orderGroupRound(f); resetSigs(); S.cache.clear(); return true;
   }
 
   // ---------- export ----------
@@ -763,8 +873,8 @@
       <div class="editor">
         <div class="cvwrap"><canvas id="cv"></canvas>
           <div class="tools">
-            <button data-mode="move" title="Drag to move the tiles">✥<span class="lbl"> Tiles</span></button><button data-mode="pan" title="Drag to move around">✋<span class="lbl"> Pan</span></button>${v.mode !== 'folded' ? '<button data-mode="edit" title="Drag corners and openings, tap a measurement to change it">✎<span class="lbl"> Shape</span></button>' : ''}
-            ${v.mode === 'plan' ? '<button data-mode="arrange" title="Drag areas into place">⇄<span class="lbl"> Arrange</span></button>' : ''}${canFold ? '<button data-a="fold" title="See the floor with its walls folded out round it">▣<span class="lbl"> Fold out</span></button>' : ''}
+            <button data-mode="move" title="Drag to move the tiles">✥<span class="lbl"> Tiles</span></button><button data-mode="pan" title="Drag to move around">✋<span class="lbl"> Pan</span></button><button data-mode="edit" title="Drag corners and openings, tap a measurement to change it">✎<span class="lbl"> Shape</span></button>
+            ${v.mode === 'plan' ? '<button data-mode="arrange" title="Drag areas into place">⇄<span class="lbl"> Arrange</span></button>' : ''}${canFold ? '<button data-a="fold" title="See the floor with its walls folded out round it">▣<span class="lbl"> Fold out</span></button>' : ''}${v.mode === 'folded' ? `<button data-a="tofloor" title="Floor on its own">▭<span class="lbl"> Floor</span></button>${wallsGroupOf(v.floor) ? '<button data-a="towalls" title="Walls unfolded">▥<span class="lbl"> Walls</span></button>' : ''}` : ''}
             <span class="sp"></span><button data-noundo data-a="undo" title="Undo">↶</button><button data-noundo data-a="redo" title="Redo">↷</button><button data-a="fit" title="Fit to screen">⤢</button><button data-a="help" title="Help">?</button>
           </div>
           <div id="hint"></div>
@@ -787,6 +897,8 @@
       if (a === 'undo') undo(); if (a === 'redo') redo();
       if (a === 'export') exportModal('view');
       if (a === 'help') helpModal();
+      if (a === 'tofloor') { const sel = cur().surface; openView(v.floor.id); return; }
+      if (a === 'towalls') { const g2 = wallsGroupOf(v.floor); const sel = cur().surface; openView(g2.id, sel.kind === 'wall' ? sel.id : null); return; }
       if (a === 'fold') { const sel = cur().surface; const fid = sel.kind === 'floor' ? sel.id : (sel.link?.floorId || v.members.map(m => m.surface).find(m => m.link)?.link.floorId); if (fid) openView('fold-' + fid, sel.id); }
     };
   }
@@ -907,7 +1019,8 @@
     // moving the tiles of one area (and everything it is locked to)
     function originDragger(s) {
       const g2 = groupOf(s);
-      if (!g2) { const ox = +s.pattern.ox || 0, oy = +s.pattern.oy || 0; return (dx, dy) => { s.pattern.ox = Math.round(ox + dx); s.pattern.oy = Math.round(oy + dy); }; }
+      if (S.selId !== s.id) { S.selId = s.id; setTimeout(renderPane, 0); }
+      if (!g2 || separate(g2)) { const ox = +s.pattern.ox || 0, oy = +s.pattern.oy || 0; return (dx, dy) => { s.pattern.ox = Math.round(ox + dx); s.pattern.oy = Math.round(oy + dy); }; }
       if (g2.mode === 'plan') { const ox = +g2.pattern.ox || 0, oy = +g2.pattern.oy || 0; return (dx, dy) => { g2.pattern.ox = Math.round(ox + dx); g2.pattern.oy = Math.round(oy + dy); }; }
       const gx = +g2.pattern.ox || 0, gy = +g2.pattern.oy || 0, sx = +s.pattern.ox || 0, sy = +s.pattern.oy || 0;
       return (dx, dy) => { if (g2.lockX) g2.pattern.ox = Math.round(gx + dx); else s.pattern.ox = Math.round(sx + dx); if (g2.lockY !== false) g2.pattern.oy = Math.round(gy + dy); else s.pattern.oy = Math.round(sy + dy); };
@@ -920,12 +1033,12 @@
       if (S.mode === 'arrange' && v.mode === 'plan') { const hit = memberAt(w); if (hit) { S.selId = hit.id; return { ...base, type: 'arrange', s: hit, px: hit.place.x, py: hit.place.y }; } }
       if (S.mode === 'bg' && surface.bg) return { ...base, type: 'bg', bx: surface.bg.x, by: surface.bg.y };
       if (S.mode === 'edit') {
-        const [W, H] = dims(); const o = off.get(surface.id);
+        const [W, H] = dims(); const r = rots(v).get(surface.id) || 0;
         let best = -1, bd = 22;
-        surface.outline.forEach((q, i) => { const s = Render.toS(S.view, W, H, [q[0] + o[0], q[1] + o[1]]); const d = Math.hypot(s[0] - p[0], s[1] - p[1]); if (d < bd) { bd = d; best = i; } });
-        if (best >= 0) { S.selVertex = best; return { ...base, type: 'vertex', i: best, q0: surface.outline[best].slice() }; }
-        const lw = [w[0] - o[0], w[1] - o[1]];
-        for (let i = surface.openings.length - 1; i >= 0; i--) { const op = surface.openings[i]; if (Geo.pointInRing(lw, Geo.opRing(op))) { S.selOpening = i; return { ...base, type: 'opening', i, x0: +op.x, y0: +op.y, pts0: op.pts ? op.pts.map(q => q.slice()) : null }; } }
+        surface.outline.forEach((q, i) => { const s = Render.toS(S.view, W, H, toWorld(v, surface, q)); const d = Math.hypot(s[0] - p[0], s[1] - p[1]); if (d < bd) { bd = d; best = i; } });
+        if (best >= 0) { S.selVertex = best; return { ...base, type: 'vertex', i: best, q0: surface.outline[best].slice(), rot: r }; }
+        const lw = toLocal(v, surface, w);
+        for (let i = surface.openings.length - 1; i >= 0; i--) { const op = surface.openings[i]; if (Geo.pointInRing(lw, Geo.opRing(op))) { S.selOpening = i; return { ...base, type: 'opening', i, x0: +op.x, y0: +op.y, pts0: op.pts ? op.pts.map(q => q.slice()) : null, rot: r }; } }
       }
       return { ...base, type: 'pan' };
     }
@@ -951,13 +1064,20 @@
         g.s.place = { x: Math.round(nx), y: Math.round(ny) }; S.cache.clear();
       }
       if (g.type === 'bg') { surface.bg.x = g.bx + wdx; surface.bg.y = g.by + wdy; }
+      const ld = Geo.rot([wdx, wdy], -(g.rot || 0));
       if (g.type === 'vertex') {
-        let nx = Math.round(g.q0[0] + wdx), ny = Math.round(g.q0[1] + wdy);
+        let nx = Math.round(g.q0[0] + ld[0]), ny = Math.round(g.q0[1] + ld[1]);
         const n = surface.outline.length; const pr = surface.outline[(g.i - 1 + n) % n], nxp = surface.outline[(g.i + 1) % n];
         const sn = 12 / s; [pr, nxp].forEach(q => { if (Math.abs(nx - q[0]) < sn) nx = q[0]; if (Math.abs(ny - q[1]) < sn) ny = q[1]; });
         surface.outline[g.i] = [nx, ny]; S.dragging = true;
       }
-      if (g.type === 'opening') { const o = surface.openings[g.i]; o.x = Math.round(g.x0 + wdx); o.y = Math.max(surface.kind === 'wall' && !g.pts0 ? 0 : -1e9, Math.round(g.y0 + wdy)); if (g.pts0) o.pts = g.pts0.map(q => [Math.round(q[0] + o.x - g.x0), Math.round(q[1] + o.y - g.y0)]); S.dragging = true; }
+      if (g.type === 'opening') {
+        const o = surface.openings[g.i]; o.x = Math.round(g.x0 + ld[0]); o.y = Math.round(g.y0 + ld[1]);
+        if (g.pts0) o.pts = g.pts0.map(q => [Math.round(q[0] + o.x - g.x0), Math.round(q[1] + o.y - g.y0)]);
+        const [sx, sy] = snapOpening(surface, o, 12 / s); o.x = Math.round(o.x + sx); o.y = Math.round(o.y + sy); if (o.pts) o.pts.forEach(q => { q[0] = Math.round(q[0] + sx); q[1] = Math.round(q[1] + sy); });
+        if (surface.kind === 'wall' && !o.pts && o.y < 0) o.y = 0;
+        S.dragging = true;
+      }
       requestDraw();
     }
     function endGesture(g, p) {
@@ -977,6 +1097,7 @@
       if (S.trace) {
         if (S.trace.length >= 3) { const f = Render.toS(S.view, W, H, toWorld(v, surface, S.trace[0])); if (Math.hypot(f[0] - p[0], f[1] - p[1]) < 18) return finishTrace(); }
         let q = [Math.round(lw[0]), Math.round(lw[1])];
+        if (S.traceTarget === 'op' || surface.outline.length >= 3 && !surface.bg) q = snapPoint(surface, q, 14 / S.view.s);
         if (S.traceOrtho && S.trace.length) { const pr = S.trace[S.trace.length - 1]; const dx = Math.abs(q[0] - pr[0]), dy = Math.abs(q[1] - pr[1]); if (dy < dx * 0.18) q[1] = pr[1]; else if (dx < dy * 0.18) q[0] = pr[0]; }
         S.trace.push(q); requestDraw(); return;
       }
@@ -991,7 +1112,7 @@
         return;
       }
       if (S.opTrace) {
-        S.opTrace.push(lw); requestDraw();
+        S.opTrace.push(snapPoint(surface, lw, 14 / S.view.s)); requestDraw();
         if (S.opTrace.length === 2) {
           checkpoint();
           const [a, b] = S.opTrace; const op = { id: Store.uid(), type: S.opType, name: OP_TYPES[S.opType], x: Math.round(Math.min(a[0], b[0])), y: Math.round(Math.min(a[1], b[1])), w: Math.round(Math.abs(a[0] - b[0])), h: Math.round(Math.abs(a[1] - b[1])), tiled: S.opType === 'unit' };
@@ -1010,7 +1131,7 @@
         }
         const tappedOther = memberAt(w); if (tappedOther && tappedOther.id !== surface.id) { selectMember(tappedOther.id); return; }
         const n = surface.outline.length; let bi = -1, bd = 14;
-        for (let i = 0; i < n; i++) { const a = Render.toS(S.view, W, H, [surface.outline[i][0] + o[0], surface.outline[i][1] + o[1]]), b = Render.toS(S.view, W, H, [surface.outline[(i + 1) % n][0] + o[0], surface.outline[(i + 1) % n][1] + o[1]]); const d = segDist(p, a, b); if (d < bd) { bd = d; bi = i; } }
+        for (let i = 0; i < n; i++) { const a = Render.toS(S.view, W, H, toWorld(v, surface, surface.outline[i])), b = Render.toS(S.view, W, H, toWorld(v, surface, surface.outline[(i + 1) % n])); const d = segDist(p, a, b); if (d < bd) { bd = d; bi = i; } }
         if (bi >= 0 && S.selVertex < 0 && S.selOpening < 0) { if (confirm('Add a corner here?')) { checkpoint(); surface.outline.splice(bi + 1, 0, [Math.round(lw[0]), Math.round(lw[1])]); save(); renderPane(); } }
         if (S.selOpening >= 0 && S.tab !== 'openings') { S.tab = 'openings'; $$('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === 'openings')); renderPane(); }
         S.selVertex = -1; requestDraw(); return;
@@ -1019,6 +1140,28 @@
       const t = memberAt(w); if (t && t.id !== S.selId) selectMember(t.id);
     }
   }
+  /* snap a point (area's own coords) to corners, then edges, of the outline and openings */
+  function snapPoint(surface, q, thr) {
+    let best = null, bd = thr;
+    const rings = [surface.outline, ...(surface.openings || []).map(o => Geo.opRing(o))];
+    rings.forEach(r => r.forEach(c => { const d = Math.hypot(c[0] - q[0], c[1] - q[1]); if (d < bd) { bd = d; best = [c[0], c[1]]; } }));
+    if (best) return best;
+    bd = thr;
+    rings.forEach(r => r.forEach((a, i) => { const c = r[(i + 1) % r.length]; const dx = c[0] - a[0], dy = c[1] - a[1]; const l = dx * dx + dy * dy || 1; let t = ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / l; if (t < 0 || t > 1) return; const pr = [a[0] + t * dx, a[1] + t * dy]; const d = Math.hypot(pr[0] - q[0], pr[1] - q[1]); if (d < bd) { bd = d; best = pr; } }));
+    return best ? [Math.round(best[0]), Math.round(best[1])] : q;
+  }
+  /* snap an opening being dragged: its edges and centre to walls, corners and other openings */
+  function snapOpening(surface, o, thr) {
+    const ring = Geo.opRing(o); const b = Geo.bbox(ring);
+    const xs = [], ys = [];
+    surface.outline.forEach(p => { xs.push(p[0]); ys.push(p[1]); });
+    surface.openings.forEach(x => { if (x === o) return; const bb = Geo.bbox(Geo.opRing(x)); xs.push(bb.x0, bb.x1, (bb.x0 + bb.x1) / 2); ys.push(bb.y0, bb.y1); });
+    let dx = null, dy = null;
+    [b.x0, b.x1, (b.x0 + b.x1) / 2].forEach(v => xs.forEach(x => { const d = x - v; if (Math.abs(d) < thr && (dx == null || Math.abs(d) < Math.abs(dx))) dx = d; }));
+    [b.y0, b.y1].forEach(v => ys.forEach(y => { const d = y - v; if (Math.abs(d) < thr && (dy == null || Math.abs(d) < Math.abs(dy))) dy = d; }));
+    return [dx || 0, dy || 0];
+  }
+  function wallsGroupOf(f) { const ws = wallsOn(f); return ws.length ? (S.job.groups.find(g => g.mode === 'strip' && ws.some(w => g.members.includes(w.id))) || null) : null; }
   function selectMember(id) { S.selId = id; S.selOpening = -1; S.selVertex = -1; history.replaceState(null, '', `#/job/${S.job.id}/v/${S.viewId}/${id}`); renderPane(); requestDraw(); toast(`Selected ${findSurface(id).surface.name}`, 1200); }
   function segDist(p, a, b) { const dx = b[0] - a[0], dy = b[1] - a[1]; const l = dx * dx + dy * dy || 1; let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l; t = Math.max(0.1, Math.min(0.9, t)); return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); }
 
@@ -1057,7 +1200,7 @@
     pane.onclick = e => paneClick(e, surface);
   }
   function bindTarget(surface, path) {
-    if (path.startsWith('pattern.')) { const g = groupOf(surface); if (g && !(g.mode === 'strip' && path === 'pattern.ox')) return g; }
+    if (path.startsWith('pattern.')) { const g = groupOf(surface); if (g && !separate(g) && !(g.mode === 'strip' && path === 'pattern.ox')) return g; }
     return surface;
   }
   function onBind(e, surface, isChange) {
@@ -1080,13 +1223,26 @@
       if (k === 'type' && isChange) { o.name = OP_TYPES[o.type]; o.tiled = o.type === 'unit'; renderPane(); }
       save(); requestDraw(); return;
     }
+    if (t.dataset.op != null && t.value !== '') { const o = surface.openings[+t.dataset.op]; o.pts[+t.dataset.opk][+t.dataset.opa] = +t.value; const bb = Geo.bbox(o.pts); o.x = Math.round(bb.x0); o.y = Math.round(bb.y0); o.w = Math.round(bb.w); o.h = Math.round(bb.h); S.cache.clear(); save(); requestDraw(); return; }
+    if (t.dataset.ocentre != null && isChange && t.value !== '') { const o = surface.openings[+t.dataset.ocentre], ref = surface.openings[+t.value]; const rb = Geo.bbox(Geo.opRing(ref)), ob = Geo.bbox(Geo.opRing(o)); const d = Math.round((rb.x0 + rb.x1) / 2 - (ob.x0 + ob.x1) / 2); o.x = Math.round(+o.x + d); if (o.pts) o.pts.forEach(q => { q[0] += d; }); S.cache.clear(); save(); renderPane(); requestDraw(); toast(`Centred over ${ref.name}`); return; }
     if (t.dataset.d != null) {
       const d = surface.doorways[+t.dataset.d]; const k = t.dataset.dk; d[k] = t.type === 'number' || k === 'edge' ? (t.value === '' ? 0 : +t.value) : t.value;
       save(); requestDraw(); if (isChange && k === 'edge') renderPane(); return;
     }
     if (t.dataset.t) { const tile = tileOf(surface); tile[t.dataset.t] = t.type === 'number' && t.value !== '' ? +t.value : t.value; S.cache.clear(); save(); requestDraw(); return; }
     if (t.id === 'tileSel' && isChange) { tileTarget(surface).tileId = t.value; S.cache.clear(); save(); renderPane(); requestDraw(); }
-    if (t.id === 'tileMode' && isChange) { const g = groupOf(surface); if (t.value === 'separate') g.members.forEach(id => { const m = findSurface(id).surface; if (m) m.tileId = g.tileId; }); else g.tileId = surface.tileId || g.tileId; g.tileMode = t.value; S.cache.clear(); save(); renderPane(); requestDraw(); }
+    if (t.id === 'tileMode' && isChange) {
+      const g = groupOf(surface); const mem = g.members.map(id => findSurface(id).surface).filter(Boolean);
+      if (t.value === 'separate') { mem.forEach(m => { m.pattern = { ...eff(m).pattern }; m.tileId = tileOf(m)?.id || g.tileId; }); g.tileMode = 'separate'; }
+      else {
+        g.tileMode = 'linked'; g.tileId = surface.tileId || g.tileId; const sp = { ...surface.pattern };
+        g.pattern = { ...sp }; g.lockX = false;
+        if (g.mode === 'plan') { g.pattern.ox = sp.ox + (surface.place?.x || 0); g.pattern.oy = sp.oy + (surface.place?.y || 0); }
+        mem.forEach(m => { m.pattern = { ...m.pattern, type: sp.type, joint: sp.joint, rotation: sp.rotation }; });
+      }
+      S.cache.clear(); save(); renderPane(); requestDraw();
+      toast(t.value === 'separate' ? 'Each one now has its own tile and set-out' : 'All now share one tile and pattern');
+    }
     if ((t.id === 'lockX' || t.id === 'lockY') && isChange) {
       const g = groupOf(surface); const mem = g.members.map(id => findSurface(id).surface).filter(Boolean); const effs = new Map(mem.map(m => [m.id, eff(m).pattern]));
       if (t.id === 'lockY') { if (t.checked) g.pattern.oy = effs.get(surface.id).oy; else mem.forEach(m => { m.pattern.oy = effs.get(m.id).oy; }); g.lockY = t.checked; }
@@ -1095,7 +1251,7 @@
       toast(t.checked ? 'Locked — walls now move together' : 'Unlocked — each wall moves on its own');
     }
     if (t.dataset.orig && isChange && t.value !== '') { const e2 = eff(surface).pattern; setOrigin(surface, t.dataset.orig === 'x' ? [+t.value, +e2.oy] : [+e2.ox, +t.value], 'Custom'); }
-    if (t.id === 'linkSel' && isChange) { const [fid, edge] = t.value.split('|'); linkWall(surface, fid || null, edge); save(); S.view = null; renderPane(); requestDraw(); toast(fid ? 'Wall linked — its width now follows the floor and the floor follows it' : 'Wall unlinked'); }
+    if (t.id === 'linkSel' && isChange) { const [fid, edge] = t.value.split('|'); const ok = linkWall(surface, fid || null, edge); save(); S.view = null; renderPane(); requestDraw(); if (ok) toast(fid ? 'Wall linked — its width now follows the floor and the floor follows it' : 'Wall unlinked'); }
     if (t.id === 'borderTile' && isChange) { surface.settings.border.tileId = t.value; S.cache.clear(); save(); renderPane(); requestDraw(); }
     if (t.id === 'idsChk') { S.showIds = t.checked; requestDraw(); }
     if (t.id === 'setChk') { S.showSetout = t.checked; requestDraw(); }
@@ -1116,9 +1272,19 @@
       <div class="card"><h2>Quick shapes</h2>
         <div class="grid"><label class="f">Width mm<input id="qrW" type="number" inputmode="decimal" value="${Math.round(bb.w)}"></label><label class="f">${s.kind === 'wall' ? 'Height' : 'Depth'} mm<input id="qrH" type="number" inputmode="decimal" value="${Math.round(bb.h)}"></label></div>
         <div class="row" style="margin-top:8px"><button class="btn sm" data-p="rect">Rectangle</button></div>
-        <div class="grid" style="margin-top:10px"><label class="f">Cut-out width mm<input id="qlW" type="number" inputmode="decimal" value="${Math.round(bb.w / 3)}"></label><label class="f">Cut-out ${s.kind === 'wall' ? 'height' : 'depth'} mm<input id="qlH" type="number" inputmode="decimal" value="${Math.round(bb.h / 3)}"></label>
-          <label class="f">Cut-out corner<select id="qlC"><option value="tr">Top right</option><option value="tl">Top left</option><option value="br">Bottom right</option><option value="bl">Bottom left</option></select></label></div>
-        <div class="row" style="margin-top:8px"><button class="btn sm sec" data-p="L">L-shape</button>${s.kind === 'wall' ? '<button class="btn sm sec" data-p="slope">Sloped ceiling</button>' : ''}</div>
+      </div>
+      <div class="card"><h2>Cut out a corner</h2><div class="muted">For L-shapes, boxing, chimney breasts. Use it as many times as you need.</div>
+        <div class="grid" style="margin-top:8px"><label class="f">Width mm<input id="qlW" type="number" inputmode="decimal" value="${Math.round(bb.w / 3)}"></label><label class="f">${s.kind === 'wall' ? 'Height' : 'Depth'} mm<input id="qlH" type="number" inputmode="decimal" value="${Math.round(bb.h / 3)}"></label>
+          <label class="f">Corner<select id="qlC"><option value="tr">Top right</option><option value="tl">Top left</option><option value="br">Bottom right</option><option value="bl">Bottom left</option></select></label>
+          <label class="f">In from the side mm<input id="qlO" type="number" inputmode="decimal" value="0"></label></div>
+        <div class="row" style="margin-top:8px"><button class="btn sm" data-p="cutcorner">Cut it out</button></div>
+        <div class="note">“In from the side” moves the cut-out along the top or bottom edge (0 = right in the corner) — e.g. a boxed-in pipe partway along.</div></div>
+      ${s.kind === 'wall' ? `<div class="card"><h2>Add a slope</h2><div class="muted">Sloped ceilings — add more than one if needed.</div>
+        <div class="grid" style="margin-top:8px"><label class="f">Slope comes down on the<select id="slSide"><option value="r">Right</option><option value="l">Left</option></select></label>
+          <label class="f">Height at that side mm<input id="slLow" type="number" inputmode="decimal" value="${Math.round(bb.h / 2)}"></label>
+          <label class="f">Slope starts this far in mm<input id="slRun" type="number" inputmode="decimal" value="${Math.round(bb.w / 2)}"></label></div>
+        <div class="row" style="margin-top:8px"><button class="btn sm" data-p="addslope">Add slope</button></div></div>` : ''}
+      <div class="card">
         <div class="row" style="margin-top:10px"><span class="muted">Wrong corner or side?</span><button class="btn sm sec" data-p="mirrorx">⇆ Flip left/right</button><button class="btn sm sec" data-p="mirrory">⇅ Flip top/bottom</button></div>
         <div class="note">Flipping moves cut-outs and slopes to the other side. Openings stay where they are.</div></div>
       ${linkCard(s)}
@@ -1134,9 +1300,9 @@
     if (s.kind === 'wall') {
       const floors = allSurfaces().filter(x => x.surface.kind === 'floor');
       if (!floors.length) return '';
-      const opts = floors.flatMap(({ room, surface: f }) => f.outline.map((p, i) => [`${f.id}|${i}`, `${room.name} — ${f.name}, side ${i + 1} (${Math.round(edgeLen(f, i))} mm)`]));
+      const opts = floors.flatMap(({ room, surface: f }) => f.outline.map((p, i) => { const o2 = wallOnEdge(f, i); return [`${f.id}|${i}`, `${room.name} — ${f.name}, side ${i + 1} (${Math.round(edgeLen(f, i))} mm)${o2 && o2 !== s ? ` — ${o2.name}` : ''}`, o2 && o2 !== s]; }));
       const cur2 = s.link ? `${s.link.floorId}|${s.link.edge}` : '';
-      return `<div class="card"><h2>Stands on</h2><label class="f">Floor side this wall sits on<select id="linkSel"><option value="">Not linked</option>${opts.map(([v, l]) => `<option value="${v}" ${v === cur2 ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
+      return `<div class="card"><h2>Stands on</h2><label class="f">Floor side this wall sits on<select id="linkSel"><option value="">Not linked</option>${opts.map(([v, l, taken]) => `<option value="${v}" ${v === cur2 ? 'selected' : ''} ${taken ? 'disabled' : ''}>${esc(l)}</option>`).join('')}</select></label>
         <div class="note">Linked walls and floors keep the same length: change one and the other follows. Doors on the wall become doorways on the floor. Linked walls can be seen folded out round the floor (▣ Fold out).</div></div>`;
     }
     const walls = allSurfaces().filter(x => x.surface.link && x.surface.link.floorId === s.id);
@@ -1159,12 +1325,16 @@
         <label class="f">Name<input data-o="${i}" data-ok="name" value="${esc(o.name)}"></label>
         <label class="f">x (from left)<input type="number" inputmode="decimal" data-o="${i}" data-ok="x" value="${o.x}"></label><label class="f">y (from ${s.kind === 'wall' ? 'floor' : 'bottom'})<input type="number" inputmode="decimal" data-o="${i}" data-ok="y" value="${o.y}"></label>
         <label class="f">Width<input type="number" inputmode="decimal" data-o="${i}" data-ok="w" value="${o.w}" ${o.pts ? 'disabled title="Drawn shape — redraw to change its size"' : ''}></label><label class="f">Height${s.kind === 'floor' ? ' (depth)' : ''}<input type="number" inputmode="decimal" data-o="${i}" data-ok="h" value="${o.h}" ${o.pts ? 'disabled' : ''}></label></div>
-        ${['unit', 'other', 'bath', 'tray'].includes(o.type) && s.kind === 'floor' ? `<label class="chk"><input type="checkbox" data-o="${i}" data-ok="tiled" ${o.tiled ? 'checked' : ''}> Tiled under it (show only)</label>` : ''}
+        ${['bath', 'tray'].includes(o.type) && s.kind === 'floor' ? `<div class="grid" style="grid-template-columns:1fr 1fr;margin-top:6px"><label class="f">Height (shows on the walls)<input type="number" inputmode="decimal" data-o="${i}" data-ok="elev" value="${o.elev || (o.type === 'tray' ? 50 : 560)}"></label></div>` : ''}
+        ${['unit', 'other'].includes(o.type) && s.kind === 'floor' ? `<label class="chk"><input type="checkbox" data-o="${i}" data-ok="tiled" ${o.tiled ? 'checked' : ''}> Tiled under it (show only)</label>` : ''}
+        ${o.pts ? `<div class="muted" style="margin-top:6px">Corners (x, y)</div>${o.pts.map((q, k) => `<div class="vtx"><span class="muted">${k + 1}</span><input type="number" inputmode="decimal" data-op="${i}" data-opk="${k}" data-opa="0" value="${Math.round(q[0])}"><input type="number" inputmode="decimal" data-op="${i}" data-opk="${k}" data-opa="1" value="${Math.round(q[1])}"><button class="x" data-opvdel="${i}|${k}" aria-label="Remove corner">×</button></div>`).join('')}` : ''}
+        ${s.openings.length > 1 ? `<label class="f" style="margin-top:6px">Centre over<select data-ocentre="${i}"><option value="">—</option>${s.openings.map((x, k) => k === i ? '' : `<option value="${k}">${esc(x.name || OP_TYPES[x.type])}</option>`).join('')}</select></label>` : ''}
+        ${o.fromFloorOp ? `<div class="note">From the floor plan — moving or resizing it here moves it on the floor too. Height = ${o.type === 'tray' ? 'tray' : 'bath'} height.</div>` : ''}${o.paired ? '<div class="note">Linked to the doorway on the floor plan.</div>' : ''}
         <div class="row" style="margin-top:6px"><button class="btn sm sec" data-opc="${i}">Centre across</button><button class="btn sm danger" data-opdel="${i}">Remove</button></div></div>`).join('') || '<div class="muted">No openings.</div>'}</div>`;
   }
   function paneTile(s) {
     const t = tileOf(s); const g = groupOf(s); const p = eff(s).pattern;
-    const modeCard = g ? `<div class="card"><h2>Tiles in “${esc(g.name)}”</h2><label class="f">Tile choice<select id="tileMode"><option value="linked" ${g.tileMode !== 'separate' ? 'selected' : ''}>Same tile on every ${g.mode === 'strip' ? 'wall' : 'area'}</option><option value="separate" ${g.tileMode === 'separate' ? 'selected' : ''}>Choose a tile for each ${g.mode === 'strip' ? 'wall' : 'area'}</option></select></label><div class="note">The pattern and joint stay shared. Offcuts are only shared between ${g.mode === 'strip' ? 'walls' : 'areas'} using the same tile.</div></div>` : '';
+    const modeCard = g ? `<div class="card"><h2>Tiles in “${esc(g.name)}”</h2><label class="f">Tile choice<select id="tileMode"><option value="linked" ${g.tileMode !== 'separate' ? 'selected' : ''}>Same tile on every ${g.mode === 'strip' ? 'wall' : 'area'}</option><option value="separate" ${g.tileMode === 'separate' ? 'selected' : ''}>Choose a tile for each ${g.mode === 'strip' ? 'wall' : 'area'}</option></select></label><div class="note">${separate(g) ? 'Each has its own tile, pattern and start point.' : 'One tile and pattern for all of them.'} Offcuts are only shared between ${g.mode === 'strip' ? 'walls' : 'areas'} using the same tile.</div></div>` : '';
     if (!t) return `${modeCard}<div class="card" style="border:2px dashed var(--bronze)"><h2>Choose a tile</h2><div class="muted">This job has no tiles yet.</div><div class="row" style="margin-top:8px"><button class="btn" data-p="newtile">+ Add a tile</button></div></div>`;
     const unit = Geo.buildUnit(t, p);
     let extra = '';
@@ -1175,7 +1345,7 @@
     if (p.type === 'windmill') extra = `<div class="note" style="grid-column:1/-1">Insert square: ${unit.sizes[1] ? unit.sizes[1].label : 'none (tiles too square)'}.</div>`;
     if (['herringbone', 'herringbone45', 'doubleHerringbone', 'chevron', 'basketweave', 'windmill'].includes(p.type)) extra += `<div class="note" style="grid-column:1/-1">Uses the long side × short side of the tile.</div>`;
     const bd = s.settings.border || {};
-    return `${modeCard}<div class="card"><h2>Tile${g && g.tileMode === 'separate' ? ` — ${esc(s.name)}` : ''}</h2>${g && g.tileMode !== 'separate' ? `<div class="note">Shared by everything in “${esc(g.name)}”.</div>` : ''}
+    return `${modeCard}<div class="card"><h2>Tile${g && g.tileMode === 'separate' ? ` — ${esc(s.name)}` : ''}</h2>${g && !separate(g) ? `<div class="note">Tile and pattern shared by everything in “${esc(g.name)}”.</div>` : ''}
         <div class="row"><label class="f" style="flex:1">Tile<select id="tileSel">${S.job.tiles.map(x => `<option value="${x.id}" ${x.id === t.id ? 'selected' : ''}>${esc(x.name)} (${x.w}×${x.h})</option>`).join('')}</select></label><button class="btn sm sec" data-p="newtile" style="align-self:flex-end">+ New</button></div>
         <div style="margin-top:8px">${tileFields(t)}</div><div class="note">Tile changes apply to every area using this tile.</div></div>
       <div class="card"><h2>Pattern</h2><div class="grid">
@@ -1191,7 +1361,7 @@
     const g = groupOf(s); const t = tileOf(s); const c = calc(s); const st = c.res?.stats;
     if (!t) return '<div class="empty">Choose a tile first (Tile &amp; pattern tab).</div>';
     const e = eff(s); const cand = Geo.startCandidates(e, t);
-    const lockCard = g && g.mode === 'strip' ? `<div class="card"><h2>Walls together</h2>
+    const lockCard = g && separate(g) ? `<div class="card"><h2>Set out separately</h2><div class="note">These ${g.mode === 'strip' ? 'walls' : 'areas'} use different tiles, so each has its own pattern and start point. Switch “Tile choice” back to the same tile on the Tile &amp; pattern tab to link them again.</div></div>` : g && g.mode === 'strip' ? `<div class="card"><h2>Walls together</h2>
         <label class="chk"><input type="checkbox" id="lockY" ${g.lockY !== false ? 'checked' : ''}> 🔒 Courses level all the way round (up/down moves every wall)</label>
         <label class="chk"><input type="checkbox" id="lockX" ${g.lockX ? 'checked' : ''}> 🔒 Tiles carry round the corners (left/right moves every wall; the offcut from the end of one wall starts the next)</label>
         <div class="note">Untick to move walls on their own. Offcuts are shared between walls either way.</div></div>` : '';
@@ -1218,7 +1388,7 @@
         <div class="note">Or use <b>✥ Tiles</b> and drag on the drawing.${g && g.mode === 'strip' ? ` Up/down moves ${g.lockY !== false ? 'every wall' : 'this wall only'}; left/right moves ${g.lockX ? 'every wall' : 'this wall only'}.` : ''}</div></div>
       <div class="card"><h2>Set-out lines</h2><label class="chk"><input type="checkbox" id="setChk" ${S.showSetout ? 'checked' : ''}> Show set-out lines and dimensions on the drawing</label>${refTxt}</div>
       <div class="card"><h2>Rules for ${esc(s.name)}</h2><div class="grid">
-        ${num('settings.sliver', 'Sliver warning under mm', s.settings.sliver, `placeholder="default ${S.settings.sliver}"`)}${num('settings.spare', 'Spare / breakage %', s.settings.spare, `placeholder="auto ${Geo.PATTERNS[e.pattern.type]?.waste}%"`)}</div>
+        ${num('settings.sliver', 'Sliver warning under mm', s.settings.sliver, `placeholder="default ${S.settings.sliver}"`)}${num('settings.spare', 'Spare / breakage %', s.settings.spare, `placeholder="default ${S.settings.mat.spareDefault ?? 10}%"`)}</div>
         <label class="chk"><input type="checkbox" data-b="settings.reuseOffcuts" ${s.settings.reuseOffcuts !== false ? 'checked' : ''}> Reuse offcuts where they fit (estimate)</label>
         ${st ? `<div class="muted">Now: ${st.needed} tiles, ${st.cuts} cuts, smallest ${st.minCut != null ? Math.round(st.minCut) + ' mm' : '-'}${st.slivers ? `, <b style="color:var(--red)">${st.slivers} under ${gs.sliver} mm</b>` : ''}.</div>` : ''}</div>`;
   }
@@ -1274,7 +1444,7 @@
   function setOrigin(s, o, label) {
     // o is the origin in this area's own coordinates
     const g = groupOf(s);
-    if (!g) { s.pattern.ox = Math.round(o[0] * 10) / 10; s.pattern.oy = Math.round(o[1] * 10) / 10; s.startLabel = label; }
+    if (!g || separate(g)) { s.pattern.ox = Math.round(o[0] * 10) / 10; s.pattern.oy = Math.round(o[1] * 10) / 10; s.startLabel = label; }
     else if (g.mode === 'strip') {
       if (g.lockX) g.pattern.ox = r10(o[0] + stripCum(g).get(s.id) + g.members.indexOf(s.id) * cornerAllow()); else s.pattern.ox = r10(o[0]);
       if (g.lockY !== false) g.pattern.oy = r10(o[1]); else s.pattern.oy = r10(o[1]);
@@ -1304,6 +1474,7 @@
       s.openings.push({ id: Store.uid(), type, name: OP_TYPES[type], x: Math.round(b.x0 + (b.w - w) / 2), y: Math.round(b.y0 + y), w, h, tiled: type === 'unit' });
       S.selOpening = s.openings.length - 1; save(); renderPane(); requestDraw(); return;
     }
+    if (t.closest('[data-opvdel]')) { const [i, k] = t.closest('[data-opvdel]').dataset.opvdel.split('|').map(Number); const o = s.openings[i]; if (o.pts.length <= 3) return toast('Needs at least 3 corners'); o.pts.splice(k, 1); const bb = Geo.bbox(o.pts); Object.assign(o, { x: Math.round(bb.x0), y: Math.round(bb.y0), w: Math.round(bb.w), h: Math.round(bb.h) }); save(); renderPane(); requestDraw(); return; }
     if (t.closest('[data-opdel]')) { s.openings.splice(+t.closest('[data-opdel]').dataset.opdel, 1); S.selOpening = -1; save(); renderPane(); requestDraw(); return; }
     if (t.closest('[data-opc]')) { const o = s.openings[+t.closest('[data-opc]').dataset.opc]; const b = Geo.bbox(s.outline); o.x = Math.round(b.x0 + (b.w - o.w) / 2); save(); renderPane(); requestDraw(); return; }
     if (t.closest('[data-ddel]')) { s.doorways.splice(+t.closest('[data-ddel]').dataset.ddel, 1); save(); renderPane(); requestDraw(); return; }
@@ -1319,7 +1490,7 @@
       const nb = Geo.bbox(old.map(map)); const shift = [-nb.x0, -nb.y0];
       linkedWalls.forEach(({ w, a, b: b2 }) => { const A = [a[0] + shift[0], a[1] + shift[1]], B = [b2[0] + shift[0], b2[1] + shift[1]]; const i2 = s.outline.findIndex((q, i) => { const r = s.outline[(i + 1) % s.outline.length]; const same = (x, y) => Math.hypot(x[0] - y[0], x[1] - y[1]) < 1; return (same(q, A) && same(r, B)) || (same(q, B) && same(r, A)); }); if (i2 >= 0) w.link.edge = i2; });
       remapDoorways(s, old, q => { const r = map(q); return [r[0] + shift[0], r[1] + shift[1]]; });
-      linkedWalls.forEach(({ w }) => syncDoors(w, s));
+      syncDoors(s); syncFixtures(s);
       resetSigs(); S.cache.clear(); autoStart(s); save(); renderPane(); requestDraw(); toast('Shape flipped'); return;
     }
     if (p === 'drawop') { S.calib = S.opTrace = null; S.trace = []; S.traceTarget = 'op'; S.mode = 'move'; setModeButtons(); requestDraw(); toast('Tap round the area that is not tiled, then tap the first point', 3500); return; }
@@ -1340,12 +1511,30 @@
     }
     if (p === 'mvleft' || p === 'mvright') { const i = g.members.indexOf(s.id); const j = p === 'mvleft' ? i - 1 : i + 1; if (j < 0 || j >= g.members.length) return; g.members.splice(i, 1); g.members.splice(j, 0, s.id); save(); S.view = null; renderPane(); requestDraw(); return; }
     if (p === 'rect') { const W = +$('#qrW').value, H = +$('#qrH').value; if (!(W > 0 && H > 0)) return; s.outline = [[0, 0], [W, 0], [W, H], [0, H]]; }
-    if (p === 'L') {
-      const W = +$('#qrW').value, H = +$('#qrH').value, cw = +$('#qlW').value, ch = +$('#qlH').value, c = $('#qlC').value;
-      if (!(cw > 0 && ch > 0 && cw < W && ch < H)) return toast('Cut-out must be smaller than the shape');
-      s.outline = { tr: [[0, 0], [W, 0], [W, H - ch], [W - cw, H - ch], [W - cw, H], [0, H]], tl: [[0, 0], [W, 0], [W, H], [cw, H], [cw, H - ch], [0, H - ch]], br: [[0, 0], [W - cw, 0], [W - cw, ch], [W, ch], [W, H], [0, H]], bl: [[cw, 0], [W, 0], [W, H], [0, H], [0, ch], [cw, ch]] }[c];
+    if (p === 'cutcorner' || p === 'addslope') {
+      let cutter;
+      if (p === 'cutcorner') {
+        const cw = +$('#qlW').value, ch = +$('#qlH').value, c = $('#qlC').value, off = +$('#qlO').value || 0;
+        if (!(cw > 0 && ch > 0)) return toast('Enter the cut-out size');
+        const x0 = c[1] === 'r' ? b.x1 - off - cw : b.x0 + off, y0 = c[0] === 't' ? b.y1 - ch : b.y0;
+        const ext = 5; // reach just past the edge so it cuts cleanly
+        cutter = Geo.rectPts(x0 - (c[1] === 'l' && !off ? ext : 0), y0 - (c[0] === 'b' ? ext : 0), cw + (!off ? ext : 0), ch + ext);
+      } else {
+        const side = $('#slSide').value, low = +$('#slLow').value, run = +$('#slRun').value;
+        if (!(low >= 0 && run > 0)) return toast('Enter the slope sizes');
+        const top = b.y1 + 5;
+        cutter = side === 'r' ? [[b.x1 - run, b.y1], [b.x1 + 5, b.y0 + low], [b.x1 + 5, top], [b.x1 - run, top]] : [[b.x0 + run, b.y1], [b.x0 + run, top], [b.x0 - 5, top], [b.x0 - 5, b.y0 + low]];
+      }
+      try {
+        const res = polygonClipping.difference([[...s.outline, s.outline[0]]], [[...cutter, cutter[0]]]);
+        if (!res.length) return toast('That would remove the whole area');
+        const biggest = res.map(pp => pp[0]).sort((a, c2) => Math.abs(Geo.ringArea(c2)) - Math.abs(Geo.ringArea(a)))[0];
+        let ring = Geo.stripClose(biggest).map(q => [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10]);
+        ring = ring.filter((q, i) => { const a = ring[(i - 1 + ring.length) % ring.length], c2 = ring[(i + 1) % ring.length]; return Math.abs((q[0] - a[0]) * (c2[1] - a[1]) - (q[1] - a[1]) * (c2[0] - a[0])) > 1; });
+        if (Geo.ringArea(ring) < 0) ring.reverse();
+        s.outline = ring;
+      } catch (err) { return toast('Could not make that shape'); }
     }
-    if (p === 'slope') { const W = +$('#qrW').value, H = +$('#qrH').value, low = +prompt('Height at the low side of the slope (mm)?', Math.round(H * 0.5)); const at = +prompt('Distance from the left where the slope starts (mm)?', Math.round(W * 0.5)); if (!(low > 0) || !(at >= 0)) return; s.outline = [[0, 0], [W, 0], [W, low], [at, H], [0, H]]; }
     if (p === 'walls' || p === 'addwall' || p === 'delwall') {
       const walls = $$('[data-wl]').map((el, i) => { const sl = $(`[data-wt="${i}"]`); let turn = sl ? sl.value : 0; if (turn === 'custom') turn = +prompt(`Turn angle after wall ${i + 1} (left is +, right is −)`, '90') || 0; return { len: +el.value, turn: +turn }; });
       if (p === 'addwall') { walls.splice(walls.length - 1, 0, { len: 1000, turn: 90 }); walls[walls.length - 2].turn = 90; }

@@ -509,7 +509,7 @@
     const depth = +tile.thick || 10;
     const out = { m2 };
     const st = res.stats;
-    const spare = surface.settings && surface.settings.spare != null && surface.settings.spare !== '' ? +surface.settings.spare : (PATTERNS[surface.pattern.type]?.waste ?? 5);
+    const spare = surface.settings && surface.settings.spare != null && surface.settings.spare !== '' ? +surface.settings.spare : (mat.spareDefault !== '' && mat.spareDefault != null ? +mat.spareDefault : 10);
     out.spare = spare;
     out.tiles = st.per.map((s, i) => {
       const order = Math.ceil(s.needed * (1 + spare / 100));
