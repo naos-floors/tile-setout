@@ -97,3 +97,7 @@ textarea.code{width:100%;min-height:160px;font-family:ui-monospace,Menlo,monospa
 @media (orientation:landscape) and (max-height:500px){
   .editor{flex-direction:row}.cvwrap{flex:1 1 auto}.panel{flex:0 0 340px}
 }
+
+.dragopts{position:absolute;right:8px;top:54px;display:flex;flex-direction:column;gap:5px;z-index:1}
+.dragopts button{background:rgba(255,255,255,.95);border:1px solid var(--line);border-radius:8px;width:40px;height:38px;font-size:17px;color:var(--gun-d);box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.dragopts button.on{background:var(--bronze-l);border-color:var(--bronze);color:var(--bronze-d)}

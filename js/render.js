@@ -88,12 +88,12 @@
     clipArea(); ctx.fillStyle = it.bgImg ? 'rgba(237,237,237,0.35)' : C.bgArea; ctx.fill('evenodd');
     const lw = Math.max(0.5, Math.min(1.2 * LS, v.s * 2));
     if (it.raw && it.raw.length) {
-      ctx.save(); clipArea(); ctx.clip('evenodd');
+      ctx.save(); clipArea(); ctx.clip('evenodd'); if (it.tileAlpha != null) ctx.globalAlpha = it.tileAlpha;
       ctx.fillStyle = it.bgImg ? 'rgba(247,242,235,0.7)' : C.full; ctx.strokeStyle = C.gun; ctx.lineWidth = lw;
       for (const t of it.raw) { ctx.beginPath(); path(ctx, t.pts, f); ctx.fill(); ctx.stroke(); }
       ctx.restore();
     } else if (res) {
-      ctx.globalAlpha = (dim ? 0.55 : 1) * (it.bgImg ? 0.78 : 1);
+      ctx.globalAlpha = (dim ? 0.55 : 1) * (it.tileAlpha ?? (it.bgImg ? 0.78 : 1));
       for (const p of res.pieces) {
         ctx.beginPath(); p.poly.forEach(r => path(ctx, r, f));
         ctx.fillStyle = p.sliver ? C.sliver : p.kind === 'full' ? (p.border ? C.border : C.full) : p.kind === 'cut' ? C.cut : C.notch;

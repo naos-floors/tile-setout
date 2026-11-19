@@ -4,7 +4,7 @@
   const S = {
     settings: Store.getSettings(), job: null, viewId: null, selId: null, tab: 'shape', mode: 'move', view: null,
     cache: new Map(), bgImgs: new Map(), selOpening: -1, selVertex: -1, trace: null, calib: null, opTrace: null, opType: 'window',
-    traceOrtho: true, best: null, dragging: false, showIds: false, showSetout: true, nudge: 10, aiBusy: false, bgPage: 1,
+    traceOrtho: true, snapOn: true, axis: 'free', snapLabel: '', best: null, dragging: false, showIds: false, showSetout: true, nudge: 10, aiBusy: false, bgPage: 1,
     undo: [], redo: [], dimHits: [],
   };
   const $ = (s, el = document) => el.querySelector(s);
@@ -310,7 +310,7 @@
         <div class="card"><h2>Automatic drawing reading (optional)</h2>
           <div class="grid">${f('apiKey', 'Anthropic API key', 'password', 'g', 'autocomplete="off" placeholder="sk-ant-…"')}${f('model', 'Model', 'text', 'g')}</div>
           <div class="note">Only needed for the in-app <b>Read drawing</b> button, which only works with signal. The key is stored on this device only. Without a key you can send a drawing to Claude with the ready-made prompt and paste the reply in.</div></div>
-        <div class="note">Version 1.3 · Naos Floors internal tool. Quantities are a guide: always check on site and follow BS 5385 and manufacturers’ instructions.</div>
+        <div class="note">Version 1.4 · Naos Floors internal tool. Quantities are a guide: always check on site and follow BS 5385 and manufacturers’ instructions.</div>
       </div></div>`;
     app.onclick = e => { if (e.target.closest('[data-a="back"]')) history.length > 1 ? history.back() : location.hash = ''; };
     app.oninput = e => {
@@ -557,20 +557,33 @@
   }
   function previewImport(data, targetSurface) {
     let out; try { out = AI.toRooms(data, (S.job.tiles[0]?.id || null)); } catch (e) { return toast(e.message, 4000); }
-    const list = out.rooms.map(r => `<div><b>${esc(r.name)}</b><ul style="margin:4px 0 8px;padding-left:18px">${r.surfaces.map(s => { const b = Geo.bbox(s.outline); const units = s.openings.filter(o => o.tiled).length; return `<li>${esc(s.name)} (${s.kind}) ${Math.round(b.w)} × ${Math.round(b.h)} mm · ${s.openings.length - units} openings${units ? ` · ${units} units tiled under` : ''}${s.doorways.length ? ` · ${s.doorways.length} doorway${s.doorways.length > 1 ? 's' : ''}` : ''}</li>`; }).join('')}</ul></div>`).join('');
+    const list = out.rooms.map((r, ri) => `<div style="margin-bottom:8px"><label class="chk" style="font-weight:700"><input type="checkbox" data-pr="${ri}" checked> ${esc(r.name)}</label>${r.surfaces.map((s, si) => { const b = Geo.bbox(s.outline); const units = s.openings.filter(o => o.tiled).length; return `<label class="chk" style="padding-left:26px;font-size:13px"><input type="checkbox" data-ps2="${ri}|${si}" checked> ${esc(s.name)} (${s.kind}) ${Math.round(b.w)} × ${Math.round(b.h)}${s.openings.length - units ? ` · ${s.openings.length - units} openings` : ''}${units ? ` · ${units} units` : ''}${s.doorways.length ? ` · ${s.doorways.length} doorway${s.doorways.length > 1 ? 's' : ''}` : ''}</label>`; }).join('')}</div>`).join('');
     const floors = out.rooms.flatMap(r => r.surfaces.filter(s => s.kind === 'floor'));
     const first = out.rooms[0]?.surfaces[0];
-    const m = modal(`<h3>Found in drawing</h3>${list || '<div class="muted">Nothing usable found.</div>'}
+    const m = modal(`<h3>Found in drawing</h3>${list ? '<div class="muted" style="margin-bottom:6px">Untick anything you don’t need.</div>' + list : '<div class="muted">Nothing usable found.</div>'}
       ${out.groups.length ? `<div class="note">Walls will open together, unfolded: ${out.groups.map(g => esc(g.name)).join(', ')}.</div>` : ''}
       ${floors.length > 1 ? '<label class="chk"><input type="checkbox" id="joinFloors"> Join the floors into one set-out (tile runs through)</label>' : ''}
       ${out.notes ? `<div class="warn"><b>Check:</b> ${esc(out.notes)}</div>` : ''}${out.warnings.map(w => `<div class="err">${esc(w)}</div>`).join('')}
       <div class="note">Automatic readings are a first draft. Check every dimension before setting out.</div>
       <div class="row">${out.rooms.length ? '<button class="btn" data-m="add">Add to job</button>' : ''}${targetSurface && first ? '<button class="btn sec" data-m="replace">Use first area for this one</button>' : ''}<button class="btn sec" data-close>Cancel</button></div>`);
+    m.addEventListener('change', e => {
+      const r = e.target.dataset.pr; if (r != null) $$(`[data-ps2^="${r}|"]`, m).forEach(c => { c.checked = e.target.checked; });
+      const p2 = e.target.dataset.ps2; if (p2) { const ri = p2.split('|')[0]; const all = $$(`[data-ps2^="${ri}|"]`, m); $(`[data-pr="${ri}"]`, m).checked = all.some(c => c.checked); }
+    });
     m.onclick = e => {
       const a = e.target.closest('[data-m]')?.dataset.m;
       if (a === 'add') {
+        // keep only what's ticked
+        const keep = new Set($$('[data-ps2]', m).filter(c => c.checked).map(c => c.dataset.ps2));
+        out.rooms.forEach((r, ri) => { r.surfaces = r.surfaces.filter((s, si) => keep.has(`${ri}|${si}`)); });
+        const keptIds = new Set(out.rooms.flatMap(r => r.surfaces.map(s => s.id)));
+        out.rooms = out.rooms.filter(r => r.surfaces.length);
+        out.rooms.forEach(r => r.surfaces.forEach(s => { if (s.link && !keptIds.has(s.link.floorId)) delete s.link; }));
+        out.groups = out.groups.map(g => ({ ...g, members: g.members.filter(id => keptIds.has(id)) })).filter(g => g.members.length > 1);
+        floors.splice(0, floors.length, ...floors.filter(f => keptIds.has(f.id)));
+        if (!out.rooms.length) return toast('Nothing ticked');
         checkpoint();
-        const join = $('#joinFloors', m)?.checked;
+        const join = $('#joinFloors', m)?.checked && floors.length > 1;
         out.rooms.forEach(r => r.surfaces.forEach(autoStart)); S.job.rooms.push(...out.rooms); S.job.groups.push(...out.groups);
         out.groups.forEach(autoStartGroup);
         let open = null;
@@ -877,6 +890,7 @@
             ${v.mode === 'plan' ? '<button data-mode="arrange" title="Drag areas into place">⇄<span class="lbl"> Arrange</span></button>' : ''}${canFold ? '<button data-a="fold" title="See the floor with its walls folded out round it">▣<span class="lbl"> Fold out</span></button>' : ''}${v.mode === 'folded' ? `<button data-a="tofloor" title="Floor on its own">▭<span class="lbl"> Floor</span></button>${wallsGroupOf(v.floor) ? '<button data-a="towalls" title="Walls unfolded">▥<span class="lbl"> Walls</span></button>' : ''}` : ''}
             <span class="sp"></span><button data-noundo data-a="undo" title="Undo">↶</button><button data-noundo data-a="redo" title="Redo">↷</button><button data-a="fit" title="Fit to screen">⤢</button><button data-a="help" title="Help">?</button>
           </div>
+          <div class="dragopts" id="dragopts"><button data-a="snap" title="Snap tiles to walls, corners, centres and openings while dragging">🧲</button><button data-a="axis" title="Drag freely, or only across, or only up/down">✛</button></div>
           <div id="hint"></div>
           <div class="stat" id="stat"></div>
         </div>
@@ -891,12 +905,14 @@
     app.onclick = e => {
       const tb = e.target.closest('[data-tab]'); if (tb) { S.tab = tb.dataset.tab; $$('.tabs button').forEach(b => b.classList.toggle('on', b === tb)); renderPane(); return; }
       const md = e.target.closest('[data-mode]'); if (md) { setMode(md.dataset.mode); return; }
-      const a = e.target.closest('.top [data-a], .tools [data-a]')?.dataset.a;
+      const a = e.target.closest('.top [data-a], .tools [data-a], .dragopts [data-a]')?.dataset.a;
       if (a === 'back') location.hash = `#/job/${S.job.id}`;
       if (a === 'fit') { S.view = null; requestDraw(); }
       if (a === 'undo') undo(); if (a === 'redo') redo();
       if (a === 'export') exportModal('view');
       if (a === 'help') helpModal();
+      if (a === 'snap') { S.snapOn = !S.snapOn; setModeButtons(); toast(S.snapOn ? 'Snapping on' : 'Snapping off', 1200); }
+      if (a === 'axis') { S.axis = { free: 'x', x: 'y', y: 'free' }[S.axis]; setModeButtons(); toast({ free: 'Drag in any direction', x: 'Drag across only ↔', y: 'Drag up/down only ↕' }[S.axis], 1400); }
       if (a === 'tofloor') { const sel = cur().surface; openView(v.floor.id); return; }
       if (a === 'towalls') { const g2 = wallsGroupOf(v.floor); const sel = cur().surface; openView(g2.id, sel.kind === 'wall' ? sel.id : null); return; }
       if (a === 'fold') { const sel = cur().surface; const fid = sel.kind === 'floor' ? sel.id : (sel.link?.floorId || v.members.map(m => m.surface).find(m => m.link)?.link.floorId); if (fid) openView('fold-' + fid, sel.id); }
@@ -905,7 +921,7 @@
   function helpModal() {
     modal(`<h3>How to use the set-out view</h3>
       <div class="note" style="font-size:14px;line-height:1.5">
-      <b>✥ Tiles</b> — drag to slide the tiles. The bronze cross is the start point.<br>
+      <b>✥ Tiles</b> — drag to slide the tiles. The bronze cross is the start point. 🧲 snaps tile edges/centres to walls, corners, centre lines and openings; ✛ / ↔ / ↕ lets you drag freely, across only or up/down only.<br>
       <b>✋ Pan</b> — drag to move around. Pinch or scroll to zoom. ⤢ fits everything on screen.<br>
       <b>✎ Shape</b> — drag corners and openings. <b>Tap a measurement</b> to type a new length. Tap an edge to add a corner.<br>
       ${curView().mode === 'plan' ? '<b>⇄ Arrange</b> — drag areas so they meet; they snap edge to edge.<br>' : ''}
@@ -916,7 +932,10 @@
       <div class="row"><button class="btn" data-close>Got it</button></div>`);
   }
   function setMode(m) { S.mode = m; S.selVertex = -1; setModeButtons(); requestDraw(); }
-  function setModeButtons() { $$('.tools [data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === S.mode && !S.trace && !S.calib && !S.opTrace)); renderHint(); }
+  function setModeButtons() {
+    $$('.tools [data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === S.mode && !S.trace && !S.calib && !S.opTrace)); renderHint();
+    const d = $('#dragopts'); if (d) { d.style.display = S.mode === 'move' && !S.trace && !S.calib && !S.opTrace ? '' : 'none'; const sb = $('[data-a="snap"]', d), ab = $('[data-a="axis"]', d); sb.classList.toggle('on', S.snapOn); ab.textContent = { free: '✛', x: '↔', y: '↕' }[S.axis]; ab.classList.toggle('on', S.axis !== 'free'); }
+  }
   function sizeCanvas() { if (!cv) return; const r = cv.parentElement.getBoundingClientRect(); const d = window.devicePixelRatio || 1; cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d); }
   function dims() { const d = window.devicePixelRatio || 1; return [cv.width / d, cv.height / d]; }
   function sceneItems(raw) {
@@ -925,7 +944,7 @@
       const c = raw ? null : calc(surface);
       const e = eff(surface);
       let rawT = null; if (raw && tileOf(surface)) { const reg = Geo.surfaceRegion(e); if (reg) rawT = Geo.layTiles(reg, tileOf(surface), e.pattern, { limit: 20000 }).tiles; }
-      return { surface: e, real: surface, tile: tileOf(surface), res: c ? c.res : null, raw: rawT, off: off.get(surface.id), rot: rots(v).get(surface.id) || 0, selected: surface.id === S.selId, bgImg: bgImgFor(surface), ref: c ? c.ref : null, dimmed: v.members.length > 1 && S.mode === 'edit' && surface.id !== S.selId, noSideDims: v.mode === 'strip' && idx > 0 && !(S.mode === 'edit' && surface.id === S.selId) };
+      return { surface: e, real: surface, tile: tileOf(surface), res: c ? c.res : null, raw: rawT, off: off.get(surface.id), rot: rots(v).get(surface.id) || 0, selected: surface.id === S.selId, bgImg: bgImgFor(surface), ref: c ? c.ref : null, dimmed: v.members.length > 1 && S.mode === 'edit' && surface.id !== S.selId, tileAlpha: surface.bg ? ((S.mode === 'edit' || S.trace || S.calib || S.opTrace || S.mode === 'bg') ? 0.18 : (surface.bg.tileAlpha ?? 0.78)) : 1, noSideDims: v.mode === 'strip' && idx > 0 && !(S.mode === 'edit' && surface.id === S.selId) };
     });
   }
   function fitView() {
@@ -950,7 +969,7 @@
     S.dimHits = [];
     Render.scene(ctx, W, H, S.view, items, { vertices: S.mode === 'edit', selVertex: S.selVertex, selOpening: S.selOpening, trace: S.trace, calib: S.calib || (S.opTrace && S.opTrace.length ? S.opTrace : null), ids: S.showIds, origins: originPoints(), dimHits: S.dimHits, setout: S.showSetout && !S.dragging && S.mode !== 'edit' && v.mode !== 'folded', multi: items.length > 1 });
     const el = $('#stat'); if (!el) return;
-    if (S.dragging) { el.innerHTML = '<span>moving…</span>'; return; }
+    if (S.dragging) { el.innerHTML = S.snapLabel ? `<span class="good">snapped: ${esc(S.snapLabel)}</span>` : '<span>moving…</span>'; return; }
     const tot = items.reduce((a, it) => { const st = it.res?.stats; if (!st) return a; a.n += st.needed; a.c += st.cuts; a.s += st.slivers; if (st.minCut != null) a.m = Math.min(a.m, st.minCut); return a; }, { n: 0, c: 0, s: 0, m: Infinity });
     if (!items.some(it => it.tile)) { el.innerHTML = '<span class="bad">Choose a tile — Tile &amp; pattern tab</span>'; return; }
     const sl = geoSettings(cur().surface).sliver;
@@ -1029,7 +1048,7 @@
       const v = curView(); const { surface } = cur(); const w = world(...p); const off = offsets(v);
       const base = { p0: p, t0: Date.now(), w0: w, moved: false, v0: { ...S.view } };
       if (S.trace || S.calib || S.opTrace) return { ...base, type: 'tap' };
-      if (S.mode === 'move') { const hit = memberAt(w) || surface; if (!tileOf(hit)) return { ...base, type: 'pan' }; return { ...base, type: 'drag', apply: originDragger(hit), rot: rots(v).get(hit.id) || 0, hit }; }
+      if (S.mode === 'move') { const hit = memberAt(w) || surface; if (!tileOf(hit)) return { ...base, type: 'pan' }; return { ...base, type: 'drag', apply: originDragger(hit), rot: rots(v).get(hit.id) || 0, hit, snapT: snapTargets(hit) }; }
       if (S.mode === 'arrange' && v.mode === 'plan') { const hit = memberAt(w); if (hit) { S.selId = hit.id; return { ...base, type: 'arrange', s: hit, px: hit.place.x, py: hit.place.y }; } }
       if (S.mode === 'bg' && surface.bg) return { ...base, type: 'bg', bx: surface.bg.x, by: surface.bg.y };
       if (S.mode === 'edit') {
@@ -1051,7 +1070,11 @@
       const wdx = dx / s, wdy = -dy / s;
       if (g.type === 'pan' || g.type === 'tap') { S.view = { ...g.v0, cx: g.v0.cx - dx / s, cy: g.v0.cy + dy / s }; requestDraw(); return; }
       g.dragging = true;
-      if (g.type === 'drag') { const l = Geo.rot([wdx, wdy], -g.rot); g.apply(l[0], l[1]); S.dragging = true; }
+      if (g.type === 'drag') {
+        const l = Geo.rot([wdx, wdy], -g.rot); if (S.axis === 'x') l[1] = 0; if (S.axis === 'y') l[0] = 0;
+        g.apply(l[0], l[1]); S.dragging = true; S.snapLabel = '';
+        if (S.snapOn && g.snapT) { const sn = snapShift(g.hit, g.snapT, 12 / s); if (sn) { g.apply(l[0] + (S.axis === 'y' ? 0 : sn[0]), l[1] + (S.axis === 'x' ? 0 : sn[1])); S.snapLabel = sn[2]; } }
+      }
       if (g.type === 'arrange') {
         g.dragging = true;
         let nx = g.px + wdx, ny = g.py + wdy; const thr = 14 / s;
@@ -1088,7 +1111,7 @@
       S.dragging = false; const v = curView();
       if (g && g.type === 'arrange' && v.group) { autoStartGroup(v.group); toast('Areas moved — set-out re-run for the joined floor (↶ to undo)', 3000); }
       else if (v && v.group) v.group.startLabel = 'Custom (dragged)'; else { const { surface } = cur(); if (surface) surface.startLabel = 'Custom (dragged)'; }
-      if (changed) { save(); S.best = null; if (['setout', 'shape', 'openings'].includes(S.tab)) renderPane(); }
+      if (changed) { save(); if (g && g.type !== 'drag') S.best = null; if (['setout', 'shape', 'openings'].includes(S.tab)) renderPane(); }
       requestDraw();
     }
     function onTap(w, p, g) {
@@ -1162,6 +1185,29 @@
     return [dx || 0, dy || 0];
   }
   function wallsGroupOf(f) { const ws = wallsOn(f); return ws.length ? (S.job.groups.find(g => g.mode === 'strip' && ws.some(w => g.members.includes(w.id))) || null) : null; }
+  /* where tiles can snap to while dragging: walls, centre lines, openings, doorways, batten (area's own coords) */
+  function snapTargets(s) {
+    const e = eff(s); if (Math.abs(Geo.patternRotation(e.pattern) % 90) > 0.01) return null;
+    const b = Geo.bbox(e.outline); const wall = s.kind === 'wall';
+    const X = [{ v: b.x0, k: 'edge', l: wall ? 'left end' : 'left wall' }, { v: b.x1, k: 'edge', l: wall ? 'right end' : 'right wall' }, { v: (b.x0 + b.x1) / 2, k: 'centre', l: 'centre' }];
+    const Y = [{ v: b.y0, k: 'edge', l: wall ? 'floor' : 'bottom wall' }, { v: b.y1, k: 'edge', l: wall ? 'ceiling' : 'top wall' }, { v: (b.y0 + b.y1) / 2, k: 'centre', l: 'centre' }];
+    e.outline.forEach(p => { X.push({ v: p[0], k: 'edge', l: 'corner' }); Y.push({ v: p[1], k: 'edge', l: 'corner' }); });
+    (e.openings || []).forEach(o => { const ob = Geo.bbox(Geo.opRing(o)); const n = o.name || OP_TYPES[o.type]; X.push({ v: ob.x0, k: 'edge', l: `${n} edge` }, { v: ob.x1, k: 'edge', l: `${n} edge` }, { v: (ob.x0 + ob.x1) / 2, k: 'centre', l: `centre of ${n}` }); Y.push({ v: ob.y0, k: 'edge', l: `${n} edge` }, { v: ob.y1, k: 'edge', l: `top of ${n}` }, { v: (ob.y0 + ob.y1) / 2, k: 'centre', l: `centre of ${n}` }); });
+    (e.doorways || []).forEach(d => { const pts = Geo.doorwayPts(e, d); if (!pts) return; X.push({ v: (pts[0][0] + pts[1][0]) / 2, k: 'centre', l: `centre of ${d.name}` }); Y.push({ v: (pts[0][1] + pts[1][1]) / 2, k: 'centre', l: `centre of ${d.name}` }); });
+    if (e.settings?.battenY !== '' && e.settings?.battenY != null) Y.push({ v: +e.settings.battenY, k: 'edge', l: 'batten' });
+    return { X, Y };
+  }
+  function snapShift(s, T, thr) {
+    const e = eff(s); const t = tileOf(s); const reg = Geo.surfaceRegion(e); if (!reg || !t) return null;
+    const g = +e.pattern.joint || 0;
+    const raw = Geo.layTiles(reg, t, e.pattern, { limit: 6000 }).tiles;
+    const ex = new Set(), ey = new Set(), cx = new Set(), cy = new Set();
+    raw.forEach(r => { ex.add(r.bb.x0); ex.add(r.bb.x1); ey.add(r.bb.y0); ey.add(r.bb.y1); cx.add((r.bb.x0 + r.bb.x1) / 2); cy.add((r.bb.y0 + r.bb.y1) / 2); cx.add(r.bb.x1 + g / 2); cy.add(r.bb.y1 + g / 2); });
+    const best = (targets, edges, centres) => { let bd = thr, out = null; targets.forEach(T2 => { (T2.k === 'edge' ? edges : centres).forEach(f => { const d = T2.v - f; if (Math.abs(d) < Math.abs(bd)) { bd = d; out = { d, l: T2.l }; } }); }); return out; };
+    const bx = best(T.X, ex, cx), by = best(T.Y, ey, cy);
+    if (!bx && !by) return null;
+    return [bx ? bx.d : 0, by ? by.d : 0, [bx && `↔ ${bx.l}`, by && `↕ ${by.l}`].filter(Boolean).join(' · ')];
+  }
   function selectMember(id) { S.selId = id; S.selOpening = -1; S.selVertex = -1; history.replaceState(null, '', `#/job/${S.job.id}/v/${S.viewId}/${id}`); renderPane(); requestDraw(); toast(`Selected ${findSurface(id).surface.name}`, 1200); }
   function segDist(p, a, b) { const dx = b[0] - a[0], dy = b[1] - a[1]; const l = dx * dx + dy * dy || 1; let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l; t = Math.max(0.1, Math.min(0.9, t)); return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); }
 
@@ -1211,7 +1257,7 @@
       setPath(target, t.dataset.b, v);
       if (t.dataset.b === 'name') { const v2 = curView(); if (!v2.group) $('.top h1').textContent = `${findSurface(surface.id).room.name} — ${surface.name}`; }
       if (/^pattern\.(ox|oy|rotation)/.test(t.dataset.b)) target.startLabel = 'Custom';
-      S.cache.clear(); save(); S.best = null; requestDraw();
+      S.cache.clear(); save(); if (!/^(pattern\.(ox|oy)|settings\.(sliver|spare|primer|trim))/.test(t.dataset.b)) S.best = null; requestDraw();
       if (isChange && (t.dataset.rerender !== undefined || t.tagName === 'SELECT' || t.type === 'checkbox')) renderPane();
       return;
     }
@@ -1258,6 +1304,7 @@
     if (t.id === 'nudgeStep') S.nudge = +t.value;
     if (t.id === 'opType') S.opType = t.value;
     if (t.id === 'bgOpacity' && surface.bg) { surface.bg.opacity = +t.value; save(); requestDraw(); }
+    if (t.id === 'tileAlpha' && surface.bg) { surface.bg.tileAlpha = +t.value; save(); requestDraw(); }
     if (t.id === 'bgPage') S.bgPage = +t.value || 1;
   }
 
@@ -1423,11 +1470,18 @@
   }
   function paneDrawing(s) {
     const online = navigator.onLine, key = !!S.settings.apiKey;
+    const others = curView().members.filter(({ surface: m }) => m !== s && m.bg);
+    const othersCard = others.length ? `<div class="card"><h2>Drawings in this view</h2><div class="muted" style="margin-bottom:6px">A drawing belongs to the area it was added to.</div><div class="row">${others.map(({ surface: m }) => `<button class="btn sm" data-sel="${m.id}">Edit drawing on ${esc(m.name)}</button>`).join('')}</div></div>` : '';
+    if (!s.bg && others.length) return othersCard + paneDrawingInner(s, online, key);
+    return paneDrawingInner(s, online, key) + othersCard;
+  }
+  function paneDrawingInner(s, online, key) {
     if (!s.bg) return `<div class="card"><h2>Import a drawing</h2><div class="muted">Photo, image or PDF of a plan or elevation. It sits behind the set-out so you can scale it and trace over it — all offline.</div>
         <div class="grid" style="margin-top:8px"><label class="f">PDF page<input id="bgPage" type="number" inputmode="numeric" value="${S.bgPage}"></label></div>
         <div class="row" style="margin-top:8px"><button class="btn" data-p="bgimport">Choose drawing</button></div></div>${aiCard(s, online, key)}`;
     return `<div class="card"><h2>Drawing</h2>
         <label class="f">Drawing visibility<input type="range" id="bgOpacity" min="0.1" max="1" step="0.05" value="${s.bg.opacity ?? 0.5}"></label>
+        <label class="f">Tiles over the drawing<input type="range" id="tileAlpha" min="0" max="1" step="0.05" value="${s.bg.tileAlpha ?? 0.78}"></label>
         ${!s.bg.scaled ? '<div class="warn">Not scaled yet. Set the scale before tracing.</div>' : ''}
         <div class="row" style="margin-top:8px"><button class="btn sm" data-p="calib">1. Set scale</button><button class="btn sm" data-p="trace">2. Trace outline</button></div>
         <div class="row" style="margin-top:8px"><label class="f" style="flex:1">3. Trace an opening or units<select id="opType">${Object.entries(OP_TYPES).map(([k, l]) => `<option value="${k}" ${S.opType === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label><button class="btn sm" data-p="optrace" style="align-self:flex-end">Trace</button></div>
