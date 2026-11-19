@@ -1,8 +1,8 @@
 /* Offline cache for Naos Tile Set-out. Bump VERSION when files change. */
-const VERSION = 'tso-v1.4.0';
+const VERSION = 'tso-v2.0.0';
 const FILES = ['./', './index.html', './manifest.webmanifest', './css/app.css',
-  './js/geometry.js', './js/store.js', './js/render.js', './js/ai.js', './js/pdf-export.js', './js/app.js',
-  './vendor/polygon-clipping.umd.min.js', './vendor/jspdf.umd.min.js', './vendor/pdf.min.js', './vendor/pdf.worker.min.js',
+  './js/geometry.js', './js/store.js', './js/render.js', './js/ai.js', './js/pdf-export.js', './js/cloud.js', './js/app.js',
+  './vendor/polygon-clipping.umd.min.js', './vendor/jspdf.umd.min.js', './vendor/pdf.min.js', './vendor/pdf.worker.min.js', './vendor/msal-browser.min.js',
   './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== VERSION).map(k => caches.delete(k)))).then(() => self.clients.claim())); });

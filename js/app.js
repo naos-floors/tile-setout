@@ -5,7 +5,7 @@
     settings: Store.getSettings(), job: null, viewId: null, selId: null, tab: 'shape', mode: 'move', view: null,
     cache: new Map(), bgImgs: new Map(), selOpening: -1, selVertex: -1, trace: null, calib: null, opTrace: null, opType: 'window',
     traceOrtho: true, snapOn: true, axis: 'free', snapLabel: '', best: null, dragging: false, showIds: false, showSetout: true, nudge: 10, aiBusy: false, bgPage: 1,
-    undo: [], redo: [], dimHits: [],
+    undo: [], redo: [], dimHits: [], pushing: new Set(), cloudErr: null,
   };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -26,19 +26,93 @@
   let saveT = null;
   function save() {
     if (syncLinks()) { requestDraw && setTimeout(() => { requestDraw(); if (S.viewId && ['shape', 'openings'].includes(S.tab)) renderPane(); }, 0); }
-    clearTimeout(saveT); saveT = setTimeout(() => S.job && Store.put(S.job).catch(e => toast('Could not save: ' + e.message)), 350);
+    if (S.job && S.job.shared) { S.job._cloud = S.job._cloud || {}; S.job._cloud.dirty = true; cloudBadge(); }
+    clearTimeout(saveT); saveT = setTimeout(() => { const j = S.job; if (!j) return; Store.put(j).then(() => { if (j.shared) queueCloud(j.id); }).catch(e => toast('Could not save: ' + e.message)); }, 350);
   }
-  function netPill() { return navigator.onLine ? '' : '<span class="offline">Offline</span>'; }
-  const onNet = () => { $$('.netslot').forEach(e => e.innerHTML = netPill()); if (S.tab === 'drawing' && S.viewId) renderPane(); };
+  function netPill() {
+    let c = '';
+    if (S.job && S.job.shared) {
+      const cl = S.job._cloud || {};
+      c = !navigator.onLine ? '☁ offline — will sync' : !Cloud.signedIn() ? '☁ sign in to sync' : S.cloudErr ? '☁ not synced' : (cl.dirty || S.pushing.has(S.job.id)) ? '☁ saving…' : '☁ saved';
+      return `<span class="offline" style="background:${S.cloudErr || !Cloud.signedIn() ? '#B91C1C' : !navigator.onLine ? 'var(--bronze)' : 'rgba(255,255,255,.18)'}">${c}</span>`;
+    }
+    return navigator.onLine ? '' : '<span class="offline">Offline</span>';
+  }
+  function cloudBadge() { $$('.netslot').forEach(e => e.innerHTML = netPill()); }
+
+  // ---------- team sharing (SharePoint) ----------
+  const pushTimers = new Map();
+  function queueCloud(id, delay = 2500) { clearTimeout(pushTimers.get(id)); pushTimers.set(id, setTimeout(() => pushNow(id), delay)); }
+  async function pushNow(id, force) {
+    if (!Cloud.signedIn() || !navigator.onLine) { cloudBadge(); return; }
+    if (S.pushing.has(id)) { queueCloud(id, 1500); return; }
+    const job = S.job && S.job.id === id ? S.job : await Store.get(id); if (!job || !job.shared) return;
+    S.pushing.add(id); cloudBadge();
+    try {
+      const before = snapAll(job);
+      const c = await Cloud.push(job, force);
+      job._cloud = { ...job._cloud, ...c };
+      if (snapAll(job) !== before) job._cloud.dirty = true; // edited while uploading
+      S.cloudErr = null; await Store.put(job);
+      if (job._cloud.dirty) queueCloud(id, 1000);
+    } catch (e) {
+      console.warn('sync', e);
+      if (e.conflict) { S.cloudErr = 'conflict'; conflictModal(job, e); }
+      else { S.cloudErr = e.message; if (e.code === 'signin') toast(e.message, 4000); else if (e.status !== 0) toast('Couldn’t save to SharePoint: ' + e.message, 4000); }
+    } finally { S.pushing.delete(id); cloudBadge(); }
+  }
+  const snapAll = j => JSON.stringify(j, (k, v) => k === '_cloud' || k === 'images' ? undefined : v);
+  async function syncAllWaiting() {
+    if (!Cloud.signedIn() || !navigator.onLine) return;
+    const jobs = await Store.list();
+    for (const j of jobs) if (j.shared && (!j._cloud || j._cloud.dirty || !j._cloud.eTag)) await pushNow(j.id);
+  }
+  function conflictModal(job, e) {
+    if ($('.modal[data-conflict]')) return;
+    const m = modal(`<h3>Someone else saved “${esc(job.name)}”</h3><div class="muted">${esc(e.by || 'Another person')} saved it${e.when ? ' at ' + new Date(e.when).toLocaleString('en-GB', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }) : ''} while you had changes waiting. What should happen?</div>
+      <div class="row" style="flex-direction:column;align-items:stretch;margin-top:10px">
+        <button class="btn" data-c="theirs">Keep theirs (lose my changes)</button>
+        <button class="btn sec" data-c="mine">Keep mine (replace theirs)</button>
+        <button class="btn sec" data-c="copy">Save mine as a separate copy</button></div>
+      <div class="note">Whichever you choose, the version you replace is still in SharePoint’s version history.</div>`);
+    m.dataset.conflict = '1';
+    m.onclick = async ev => {
+      const c = ev.target.closest('[data-c]')?.dataset.c; if (!c) return;
+      m.remove(); S.cloudErr = null;
+      try {
+        if (c === 'theirs') { const fresh = await Cloud.pull(job._cloud.folderId, job.images); await Store.put(fresh); if (S.job && S.job.id === job.id) { S.job = fresh; S.cache.clear(); resetSigs(); route(); } toast('Their version loaded'); }
+        if (c === 'mine') { await pushNow(job.id, true); toast('Your version saved'); }
+        if (c === 'copy') {
+          const copy = JSON.parse(JSON.stringify(job)); copy.id = Store.uid(); copy.name = job.name + ' (my copy)'; copy._cloud = { dirty: true }; copy.shared = true;
+          await Store.put(copy); await pushNow(copy.id);
+          const fresh = await Cloud.pull(job._cloud.folderId, job.images); await Store.put(fresh);
+          S.job = null; location.hash = `#/job/${copy.id}`; toast('Saved as a copy — the original now has their version');
+        }
+      } catch (err) { toast('Couldn’t finish: ' + err.message, 4000); }
+    };
+  }
+  /* open a team job: get the latest from SharePoint first if it's changed */
+  async function openShared(entry) {
+    const local = await Store.get(entry.jobId);
+    if (local && local._cloud?.dirty) { location.hash = `#/job/${entry.jobId}`; return; }
+    if (!navigator.onLine) { if (local) location.hash = `#/job/${entry.jobId}`; else toast('Not on this device yet — needs signal to download'); return; }
+    try {
+      toast('Opening…', 8000);
+      const meta = await Cloud.jobMeta(entry.folderId).catch(() => null);
+      if (!local || !meta || local._cloud?.eTag !== meta.eTag) { const fresh = await Cloud.pull(entry.folderId, local?.images || {}); await Store.put(fresh); }
+      $$('.toast').forEach(t => t.remove()); S.job = null; location.hash = `#/job/${entry.jobId}`;
+    } catch (e) { toast('Couldn’t open from SharePoint: ' + e.message, 4000); if (local) location.hash = `#/job/${entry.jobId}`; }
+  }
+  const onNet = () => { $$('.netslot').forEach(e => e.innerHTML = netPill()); if (S.tab === 'drawing' && S.viewId) renderPane(); if (navigator.onLine) syncAllWaiting(); if (!S.job && !S.viewId && location.hash.replace(/^#\/?/, '') === '') renderHome(); };
   window.addEventListener('online', onNet); window.addEventListener('offline', onNet);
 
   // ---------- undo / redo ----------
-  const snap = () => JSON.stringify(S.job, (k, v) => k === 'images' ? undefined : v);
+  const snap = () => JSON.stringify(S.job, (k, v) => k === 'images' || k === '_cloud' ? undefined : v);
   function checkpoint() {
     if (!S.job) return; const j = snap();
     if (S.undo[S.undo.length - 1] !== j) { S.undo.push(j); if (S.undo.length > 80) S.undo.shift(); S.redo = []; }
   }
-  function restore(str) { const imgs = S.job.images; S.job = JSON.parse(str); S.job.images = imgs; S.cache.clear(); S.best = null; resetSigs(); save(); route(); }
+  function restore(str) { const imgs = S.job.images, cl = S.job._cloud, sh = S.job.shared; S.job = JSON.parse(str); S.job.images = imgs; S.job._cloud = cl; S.job.shared = sh; S.cache.clear(); S.best = null; resetSigs(); save(); route(); }
   function undo() {
     if (!S.job) return; const cur = snap();
     while (S.undo.length && S.undo[S.undo.length - 1] === cur) S.undo.pop();
@@ -232,6 +306,7 @@
   // ---------- routing ----------
   window.addEventListener('hashchange', route);
   async function route() {
+    if (/(^|[#&])(code|error|state)=/.test(location.hash)) return; // Microsoft sign-in in progress
     const h = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
     if (h[0] === 'job') {
       if (!S.job || S.job.id !== h[1]) { S.job = await Store.get(h[1]); S.cache.clear(); S.view = null; S.undo = []; S.redo = []; resetSigs(); }
@@ -258,23 +333,46 @@
   async function renderHome() {
     S.job = null;
     const jobs = await Store.list();
+    const signed = Cloud.signedIn(), online = navigator.onLine;
+    const localRow = j => `<div class="item click" data-open="${j.id}"><div class="main"><div class="t">${esc(j.name)}${j.shared ? '' : ' <span class="pill">this device only</span>'}${j._cloud?.dirty ? ' <span class="pill" style="background:#FCEFD9">changes waiting</span>' : ''}</div><div class="s">${esc(j.client || '')}${j.client ? ' · ' : ''}${j.rooms.length} room${j.rooms.length === 1 ? '' : 's'} · ${j.rooms.reduce((a, r) => a + r.surfaces.length, 0)} areas · ${new Date(j.updated).toLocaleDateString('en-GB')}</div></div>${signed && !j.shared ? `<button class="btn sm sec" data-share="${j.id}">Share</button>` : '<span class="muted">›</span>'}</div>`;
     app.innerHTML = `
       <div class="top"><div class="brand">NAOS <span>FLOORS</span></div><h1 style="font-weight:400;opacity:.85">Tile Set-out</h1><span class="netslot">${netPill()}</span><button data-a="settings" aria-label="Settings">⚙︎</button></div>
       <div class="scroll"><div class="wrap">
-        <div class="card"><h2>Jobs<span class="sp"></span><button class="btn sec sm" data-a="import">Open job file</button><button class="btn sec sm" data-a="pastejob">Paste job</button><button class="btn sm" data-a="new">+ New job</button></h2>
-          <div class="list">${jobs.length ? jobs.map(j => `<div class="item click" data-open="${j.id}"><div class="main"><div class="t">${esc(j.name)}</div><div class="s">${esc(j.client || '')}${j.client ? ' · ' : ''}${j.rooms.length} room${j.rooms.length === 1 ? '' : 's'} · ${j.rooms.reduce((a, r) => a + r.surfaces.length, 0)} areas · ${new Date(j.updated).toLocaleDateString('en-GB')}</div></div><span class="muted">›</span></div>`).join('') : '<div class="empty">No jobs yet.<br>Tap <b>+ New job</b> to start, or open a job file.</div>'}</div>
+        ${signed ? `<div class="card"><h2>Team jobs<span class="sp"></span><button class="btn sm" data-a="new">+ New job</button></h2>
+            <div class="muted" style="margin-bottom:6px">Shared through SharePoint · signed in as ${esc(Cloud.user())}</div>
+            <div class="list" id="teamList">${online ? '<div class="muted">Loading from SharePoint…</div>' : jobs.filter(j => j.shared).map(localRow).join('') + '<div class="note">Offline — showing the team jobs on this device. Changes upload when you have signal.</div>'}</div></div>`
+        : `<div class="card" style="border:2px dashed var(--bronze)"><h2>Team jobs</h2><div class="muted">Sign in with your Naos Microsoft account to see and share everyone’s set-outs.</div><div class="row" style="margin-top:8px"><button class="btn" data-a="signin" ${online && Cloud.available() ? '' : 'disabled'}>Sign in with Microsoft</button></div>${!online ? '<div class="note">Needs signal to sign in.</div>' : ''}${window.__tsoSignInError ? `<div class="err">${esc(window.__tsoSignInError)}</div>` : ''}</div>`}
+        <div class="card"><h2>${signed ? 'Only on this device' : 'Jobs'}<span class="sp"></span><button class="btn sec sm" data-a="import">Open job file</button><button class="btn sec sm" data-a="pastejob">Paste job</button>${signed ? '' : '<button class="btn sm" data-a="new">+ New job</button>'}</h2>
+          <div class="list">${(signed ? jobs.filter(j => !j.shared) : jobs).map(localRow).join('') || `<div class="empty">${signed ? 'Nothing here — every job on this device is shared.' : 'No jobs yet.<br>Tap <b>+ New job</b> to start, or open a job file.'}</div>`}</div>
         </div>
-        <div class="note">Everything is saved on this device and works with no signal. To move a job between phone and computer, use <b>Save job file</b> on the job and open it on the other device.</div>
+        <div class="note">${signed ? 'Team jobs save to SharePoint automatically. Jobs you’ve opened stay on this device and work with no signal.' : 'Everything is saved on this device and works with no signal.'}</div>
       </div></div>`;
     app.onclick = async e => {
+      const sh = e.target.closest('[data-share]'); if (sh) { e.stopPropagation(); const j = await Store.get(sh.dataset.share); j.shared = true; j._cloud = { dirty: true }; await Store.put(j); toast('Sharing…'); await pushNow(j.id); renderHome(); return; }
+      const tm = e.target.closest('[data-team]'); if (tm) { openShared(S.teamList.find(x => x.jobId === tm.dataset.team)); return; }
       const o = e.target.closest('[data-open]'); if (o) { location.hash = `#/job/${o.dataset.open}`; return; }
       const a = e.target.closest('[data-a]')?.dataset.a;
       if (a === 'settings') location.hash = '#/settings';
-      if (a === 'new') { const name = prompt('Job name', 'New job'); if (name == null) return; const j = Store.newJob(name || 'New job'); await Store.put(j); location.hash = `#/job/${j.id}`; }
+      if (a === 'signin') { try { await Cloud.signIn(); } catch (err) { toast(err.message, 4000); } }
+      if (a === 'new') { const name = prompt('Job name', 'New job'); if (name == null) return; const j = Store.newJob(name || 'New job'); if (Cloud.signedIn()) { j.shared = true; j._cloud = { dirty: true }; } await Store.put(j); if (j.shared) queueCloud(j.id, 500); location.hash = `#/job/${j.id}`; }
       if (a === 'import') importJobFile();
       if (a === 'pastejob') { const m = modal(`<h3>Paste a job</h3><div class="muted">On the other device open the job and tap <b>Copy job</b>, then paste it here.</div><textarea class="code" id="pjob" placeholder='{"app":"naos-tile-setout",...}'></textarea><div class="row"><button class="btn" data-m="go">Open job</button><button class="btn sec" data-close>Cancel</button></div>`); m.querySelector('[data-m="go"]').onclick = () => { const t = $('#pjob', m).value; m.remove(); importJobText(t); }; }
     };
     app.oninput = null;
+    if (signed && online) {
+      try {
+        const team = await Cloud.list(); S.teamList = team;
+        const el = $('#teamList'); if (!el) return;
+        const local = new Map(jobs.map(j => [j.id, j]));
+        // shared jobs on this device that aren't in SharePoint yet (waiting to upload)
+        const waiting = jobs.filter(j => j.shared && !team.some(t => t.jobId === j.id));
+        team.sort((a, b) => (b.modified || '').localeCompare(a.modified || ''));
+        el.innerHTML = team.map(t => { const l = local.get(t.jobId); return `<div class="item click" data-team="${t.jobId}"><div class="main"><div class="t">${esc(t.name)}${l?._cloud?.dirty ? ' <span class="pill" style="background:#FCEFD9">changes waiting</span>' : ''}${l ? '' : ' <span class="pill" style="background:#E7EEF9;color:#1D4ED8">not on this device</span>'}</div><div class="s">Saved ${t.modified ? new Date(t.modified).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''}${t.by ? ' by ' + esc(t.by) : ''}</div></div><span class="muted">›</span></div>`; }).join('')
+          + waiting.map(localRow).join('') || '<div class="empty">No team jobs yet. Tap <b>+ New job</b>, or <b>Share</b> one from this device.</div>';
+      } catch (err) {
+        const el = $('#teamList'); if (el) el.innerHTML = `<div class="err">Couldn’t load from SharePoint: ${esc(err.message)}</div>` + jobs.filter(j => j.shared).map(localRow).join('');
+      }
+    }
   }
   async function importJobFile() {
     const f = await pickFile(''); if (!f) return;
@@ -285,10 +383,12 @@
       const st = text.indexOf('{'); if (st < 0) throw new Error('No job found in that text');
       const j = JSON.parse(text.slice(st, text.lastIndexOf('}') + 1)); let job = j.job || j;
       if (!job.rooms || !job.tiles) throw new Error('Not a tile set-out job file');
-      job = Store.migrate(job);
+      job = Store.migrate(job); delete job._cloud;
       const existing = await Store.get(job.id);
       if (existing && !confirm(`"${existing.name}" is already on this device.\nOK = replace it with the file version\nCancel = keep both`)) { job.id = Store.uid(); job.name += ' (copy)'; }
-      await Store.put(job); toast('Job opened'); S.job = null; location.hash = `#/job/${job.id}`;
+      if (existing && existing._cloud && job.id === existing.id) job._cloud = { ...existing._cloud, dirty: true };
+      if (Cloud.signedIn()) { job.shared = true; job._cloud = job._cloud || { dirty: true }; }
+      await Store.put(job); if (job.shared) queueCloud(job.id, 500); toast('Job opened'); S.job = null; location.hash = `#/job/${job.id}`;
     } catch (e) { toast('Could not open file: ' + e.message, 4000); }
   }
 
@@ -299,6 +399,7 @@
     app.innerHTML = `
       <div class="top"><button data-a="back">‹ Back</button><h1>Settings</h1></div>
       <div class="scroll"><div class="wrap">
+        <div class="card"><h2>Team sharing</h2>${Cloud.signedIn() ? `<div class="muted">Signed in as <b>${esc(Cloud.user())}</b>. Team jobs save to the shared SharePoint folder.</div><div class="row" style="margin-top:8px"><a class="btn sec sm" href="${esc(Cloud.folderUrl())}" target="_blank" rel="noopener">Open the SharePoint folder</a><button class="btn sec sm" data-a="signout">Sign out</button></div>` : `<div class="muted">Not signed in — jobs stay on this device.</div><div class="row" style="margin-top:8px"><button class="btn sm" data-a="signin" ${navigator.onLine && Cloud.available() ? '' : 'disabled'}>Sign in with Microsoft</button></div>`}</div>
         <div class="card"><h2>Set-out</h2><div class="grid">
           ${f('sliver', 'Warn on cuts under (mm)', 'number', 'g')}${f('kerf', 'Blade / cut allowance (mm)', 'number', 'g')}${f('minOffcut', 'Smallest usable offcut (mm)', 'number', 'g')}
         </div></div>
@@ -310,9 +411,13 @@
         <div class="card"><h2>Automatic drawing reading (optional)</h2>
           <div class="grid">${f('apiKey', 'Anthropic API key', 'password', 'g', 'autocomplete="off" placeholder="sk-ant-…"')}${f('model', 'Model', 'text', 'g')}</div>
           <div class="note">Only needed for the in-app <b>Read drawing</b> button, which only works with signal. The key is stored on this device only. Without a key you can send a drawing to Claude with the ready-made prompt and paste the reply in.</div></div>
-        <div class="note">Version 1.4 · Naos Floors internal tool. Quantities are a guide: always check on site and follow BS 5385 and manufacturers’ instructions.</div>
+        <div class="note">Version 2.0 · Naos Floors internal tool. Quantities are a guide: always check on site and follow BS 5385 and manufacturers’ instructions.</div>
       </div></div>`;
-    app.onclick = e => { if (e.target.closest('[data-a="back"]')) history.length > 1 ? history.back() : location.hash = ''; };
+    app.onclick = async e => {
+      if (e.target.closest('[data-a="back"]')) history.length > 1 ? history.back() : location.hash = '';
+      if (e.target.closest('[data-a="signin"]')) { try { await Cloud.signIn(); } catch (err) { toast(err.message, 4000); } }
+      if (e.target.closest('[data-a="signout"]')) { if (confirm('Sign out? Team jobs already on this device stay here and sync again when you sign back in.')) Cloud.signOut(); }
+    };
     app.oninput = e => {
       const k = e.target.dataset.s; if (!k) return;
       const [src, key] = k.split('.'); const v = e.target.type === 'number' ? (e.target.value === '' ? '' : +e.target.value) : e.target.value;
@@ -391,7 +496,15 @@
         return;
       }
       if (a === 'savefile') { await Store.put(job); shareOrDownload(new Blob([JSON.stringify({ app: 'naos-tile-setout', v: 3, job })], { type: 'application/json' }), `${safeName(job.name)}.json`); }
-      if (a === 'deljob') { if (confirm(`Delete "${job.name}" from this device?\nSave a job file first if you want a copy.`)) { await Store.del(job.id); S.job = null; location.hash = ''; } }
+      if (a === 'deljob') {
+        if (!job.shared || !job._cloud?.folderId) { if (confirm(`Delete "${job.name}" from this device?\nSave a job file first if you want a copy.`)) { await Store.del(job.id); S.job = null; location.hash = ''; } return; }
+        const m = modal(`<h3>Delete “${esc(job.name)}”</h3><div class="row" style="flex-direction:column;align-items:stretch"><button class="btn sec" data-m="here">Remove from this device only</button><button class="btn danger" data-m="all">Delete for everyone (from SharePoint too)</button><button class="btn sec" data-close>Cancel</button></div><div class="note">Deleting from SharePoint puts it in the SharePoint recycle bin, so it can still be recovered there.</div>`);
+        m.onclick = async ev => {
+          const w = ev.target.closest('[data-m]')?.dataset.m; if (!w) return;
+          if (w === 'all') { if (!navigator.onLine) return toast('Needs signal to delete from SharePoint'); try { await Cloud.remove(job._cloud.folderId); } catch (err) { return toast('Couldn’t delete from SharePoint: ' + err.message, 4000); } }
+          await Store.del(job.id); m.remove(); S.job = null; location.hash = ''; toast(w === 'all' ? 'Deleted for everyone' : 'Removed from this device');
+        };
+      }
       if (a === 'paste') pasteModal(null);
       if (a === 'prompt') copyPrompt();
       if (a === 'aifile') { const f = await pickFile('image/*,application/pdf'); if (!f) return; let page = 1; if (/pdf/.test(f.type)) page = +prompt('Which page of the PDF?', '1') || 1; toast('Reading drawing… this can take up to a minute', 60000); try { const im = await fileToImage(f, page); const data = await AI.readWithApi(im.dataUrl, S.settings); $$('.toast').forEach(x => x.remove()); previewImport(data, null, im); } catch (err) { toast(err.message, 5000); } }
@@ -1643,5 +1756,5 @@
   function fitBg(s) { const img = bgImgFor(s); if (!img || !cv) return; const bg = s.bg; const o = offsets(curView()).get(s.id); if (rots(curView()).get(s.id)) return; const [W, H] = dims(); S.view = Render.makeView(Geo.bbox([[bg.x + o[0], bg.y + o[1]], [bg.x + img.width * bg.mmPerPx + o[0], bg.y - img.height * bg.mmPerPx + o[1]]]), W, H, 20); }
 
   window.__tso = S; // for testing
-  route();
+  Cloud.init().catch(e => console.warn(e)).finally(() => { route(); syncAllWaiting(); });
 })();
