@@ -1,0 +1,16 @@
+{
+  "name": "Naos Tile Set-out",
+  "short_name": "Tile Set-out",
+  "description": "Set out tiled walls and floors, cut lists and order quantities — works offline.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F6F5F3",
+  "theme_color": "#4A4B4D",
+  "icons": [
+    {"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}
