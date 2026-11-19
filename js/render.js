@@ -25,7 +25,8 @@
       const tl = f([b.x, b.y]); const sc = b.mmPerPx * v.s;
       ctx.globalAlpha = b.opacity ?? 0.5; ctx.drawImage(it.bgImg, tl[0], tl[1], it.bgImg.width * sc, it.bgImg.height * sc); ctx.globalAlpha = 1;
     });
-    o.doorSeen = [];
+    o.doorSeen = []; o.taken = []; o.deferred = [];
+    if (!o.labelMode) o.labelMode = 'auto';
     // edges where two areas meet: no measurement labels (they would sit inside the other area)
     if (items.length > 1) {
       const key = (a, b) => { const k1 = `${Math.round(a[0] / 5)},${Math.round(a[1] / 5)}`, k2 = `${Math.round(b[0] / 5)},${Math.round(b[1] / 5)}`; return k1 < k2 ? k1 + '|' + k2 : k2 + '|' + k1; };
@@ -51,6 +52,8 @@
       ctx.font = `700 ${13 * LS}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
       ctx.fillStyle = it.selected ? C.bronze : C.gun; ctx.fillText(it.surface.name, p[0], p[1] - 18 * LS);
     });
+    // cut sizes last, only where they don't collide with anything already drawn
+    o.deferred.sort((a, b) => b.pr - a.pr).forEach(d => { if (fits(o, d)) d.draw(); });
     // origin markers
     (o.origins || []).forEach(pt => {
       const q = toS(v, W, H, pt); ctx.strokeStyle = C.bronze; ctx.lineWidth = 2;
@@ -69,6 +72,12 @@
       o.calib.forEach(p => { const q = fs(p); ctx.beginPath(); ctx.arc(q[0], q[1], 6, 0, 7); ctx.fill(); });
     }
     ctx.restore();
+  }
+  /* label collision: in 'auto' a label is skipped if it would overlap one already placed */
+  function fits(o, r) {
+    const pad = 2;
+    if (o.labelMode !== 'all' && o.taken.some(t => r.x < t.x + t.w + pad && r.x + r.w + pad > t.x && r.y < t.y + t.h + pad && r.y + r.h + pad > t.y)) return false;
+    o.taken.push({ x: r.x, y: r.y, w: r.w, h: r.h }); return true;
   }
   function fOf(v, W, H, off, rot) {
     const dx = off ? off[0] : 0, dy = off ? off[1] : 0;
@@ -100,7 +109,7 @@
         ctx.fill('evenodd'); ctx.strokeStyle = C.gun; ctx.lineWidth = lw; ctx.stroke();
       }
       ctx.globalAlpha = dim ? 0.55 : 1;
-      if (o.labels !== false) labels(ctx, v, f, res, o, LS);
+      if (o.labels !== false) labels(ctx, v, f, res, o, LS, dim ? 0.55 : 1);
     }
     ctx.restore(); return;
     }
@@ -112,7 +121,7 @@
       hatch(ctx, f, op, 'rgba(109,110,112,0.35)');
       const sel = it.selected && o.selOpening === i;
       ctx.strokeStyle = sel ? C.bronze : C.gun; ctx.lineWidth = sel ? 2.5 : 1.5; ctx.beginPath(); path(ctx, pts, f); ctx.stroke();
-      opLabel(ctx, f, op, op.name || op.type, C.ink, LS);
+      opLabel(ctx, f, op, op.name || op.type, C.ink, LS, o);
     });
     // tiled-under units: dashed outline over the tiles, joint distances at visible fronts
     region.units.forEach(op => {
@@ -121,13 +130,15 @@
       ctx.beginPath(); path(ctx, pts, f); ctx.fillStyle = 'rgba(37,99,235,0.07)'; ctx.fill();
       const sel = it.selected && o.selOpening === i;
       ctx.setLineDash([7, 4]); ctx.strokeStyle = sel ? C.bronze : C.blue; ctx.lineWidth = sel ? 2.5 : 1.8; ctx.beginPath(); path(ctx, pts, f); ctx.stroke(); ctx.setLineDash([]);
-      opLabel(ctx, f, op, `${op.name || 'Units'} (tiled under)`, C.blue, LS);
+      opLabel(ctx, f, op, `${op.name || 'Units'} (tiled under)`, C.blue, LS, o);
     });
-    if (res && res.units && o.labels !== false) res.units.forEach(u => u.fronts.forEach(fr => {
+    const showUnits = o.labelMode === 'all' || (o.labelMode === 'auto' && (!o.multi || it.selected));
+    if (res && res.units && o.labels !== false && showUnits) res.units.forEach(u => u.fronts.forEach(fr => {
       if (fr.dist == null) return;
       const m = [(fr.a[0] + fr.b[0]) / 2 + fr.out[0] * 2, (fr.a[1] + fr.b[1]) / 2 + fr.out[1] * 2]; const q = f(m);
       const txt = fr.side === 'on' ? 'joint on line' : `joint ${fr.dist} ${fr.side === 'under' ? 'under' : 'out'}`;
       ctx.font = `600 ${10.5 * LS}px ${FONT}`; const tw = ctx.measureText(txt).width;
+      if (!fits(o, { x: q[0] - tw / 2 - 4, y: q[1] - 8 * LS, w: tw + 8, h: 16 * LS })) return;
       ctx.fillStyle = 'rgba(255,255,255,0.92)'; ctx.fillRect(q[0] - tw / 2 - 4, q[1] - 8 * LS, tw + 8, 16 * LS);
       ctx.fillStyle = fr.side !== 'on' && fr.dist < 50 ? '#B91C1C' : C.blue; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, q[0], q[1]);
     }));
@@ -140,12 +151,17 @@
       ctx.strokeStyle = '#fff'; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
       ctx.strokeStyle = C.green; ctx.lineWidth = 3; ctx.setLineDash([5, 3]); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); ctx.setLineDash([]);
       [a, b].forEach(q => { ctx.fillStyle = C.green; ctx.beginPath(); ctx.arc(q[0], q[1], 3.5, 0, 7); ctx.fill(); });
-      const key = [Math.round(a[0] / 8), Math.round(a[1] / 8), Math.round(b[0] / 8), Math.round(b[1] / 8)].sort().join(',');
-      if (o.doorSeen) { if (o.doorSeen.includes(key)) return; o.doorSeen.push(key); }
+      const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (o.doorSeen.some(x => Math.hypot(x[0] - mid[0], x[1] - mid[1]) < Math.max(14, len * 0.25))) return; // same doorway seen from the other room
+      o.doorSeen.push(mid);
+      if (o.labelMode === 'none') return;
       ctx.font = `600 ${10.5 * LS}px ${FONT}`; ctx.fillStyle = C.green; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      const m = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]; const nx = -(b[1] - a[1]), ny = b[0] - a[0]; const nl = Math.hypot(nx, ny) || 1;
+      const nx = -(b[1] - a[1]), ny = b[0] - a[0]; const nl = Math.hypot(nx, ny) || 1;
       const sign = Geo.ringArea(region.outline) >= 0 ? -1 : 1;
-      ctx.fillText(`${d.name || 'Door'} ${Math.round(+d.w)}`, m[0] + sign * nx / nl * 12 * LS, m[1] + sign * ny / nl * 12 * LS);
+      const txt = `${d.name || 'Door'} ${Math.round(+d.w)}`, tw = ctx.measureText(txt).width;
+      const px = mid[0] + sign * nx / nl * 12 * LS, py = mid[1] + sign * ny / nl * 12 * LS;
+      if (!fits(o, { x: px - tw / 2, y: py - 7 * LS, w: tw, h: 14 * LS })) return;
+      ctx.fillText(txt, px, py);
     });
     if (o.dims !== false) drawDims(ctx, region.outline, f, o, it, LS);
     if (o.vertices && it.selected) region.outline.forEach((p, i) => { const q = f(p); ctx.beginPath(); ctx.arc(q[0], q[1], o.selVertex === i ? 9 : 6, 0, 7); ctx.fillStyle = o.selVertex === i ? C.bronze : '#fff'; ctx.fill(); ctx.strokeStyle = C.bronze; ctx.lineWidth = 2; ctx.stroke(); });
@@ -157,7 +173,7 @@
       ctx.fillStyle = C.blue; ctx.font = `${11 * LS}px ${FONT}`; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'; ctx.fillText(`batten ${bat}`, a[0] + 4, a[1] - 3);
     }
     // set-out lines for fitters
-    if (o.setout && it.ref) setoutOverlay(ctx, f, region, it.ref, LS);
+    if (o.setout && it.ref && (o.labelMode === 'all' || !o.multi || it.selected)) setoutOverlay(ctx, f, region, it.ref, LS, o);
     ctx.restore();
   }
 
@@ -170,18 +186,22 @@
     for (let x = x0 - h; x < x1; x += 10) { ctx.beginPath(); ctx.moveTo(x, y1); ctx.lineTo(x + h, y0); ctx.stroke(); }
     ctx.restore();
   }
-  function opLabel(ctx, f, op, text, col, LS) {
+  function opLabel(ctx, f, op, text, col, LS, o) {
     const sp = Geo.opRing(op).map(f); const xs = sp.map(p => p[0]), ys = sp.map(p => p[1]);
     const w = Math.max(...xs) - Math.min(...xs), h = Math.max(...ys) - Math.min(...ys); if (w < 34 || h < 14) return;
     const c = [(Math.max(...xs) + Math.min(...xs)) / 2, (Math.max(...ys) + Math.min(...ys)) / 2];
     let fs = 12 * LS; ctx.font = `600 ${fs}px ${FONT}`; const tw = ctx.measureText(text).width; if (tw > w - 6) fs *= (w - 6) / tw; if (fs < 7) return;
-    ctx.font = `600 ${fs}px ${FONT}`; ctx.fillStyle = col; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, c[0], c[1]);
+    ctx.font = `600 ${fs}px ${FONT}`; const tw2 = ctx.measureText(text).width;
+    if (o && !fits(o, { x: c[0] - tw2 / 2, y: c[1] - fs * 0.6, w: tw2, h: fs * 1.2 })) return;
+    ctx.fillStyle = col; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, c[0], c[1]);
   }
 
-  function labels(ctx, v, f, res, o, LS) {
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  function labels(ctx, v, f, res, o, LS, alpha) {
+    if (o.labelMode === 'none') return;
+    const auto = o.labelMode !== 'all'; const minFs = (auto ? 8.5 : 6.5) * LS;
     for (const p of res.pieces) {
       const b = Geo.bbox(p.poly[0]); const sw = b.w * v.s, sh = b.h * v.s;
+      if (p.kind === 'full' && !o.ids) continue;
       const lp = p.kind === 'cut' || p.kind === 'full' ? { x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2, r: Math.min(b.w, b.h) / 2 } : labelPoint(p.poly, b);
       const c = f([lp.x, lp.y]); const room = lp.r * 2 * v.s;
       if (p.kind !== 'full' && room > 14 * LS && Math.max(sw, sh) > 36 * LS) {
@@ -189,18 +209,29 @@
         const vertical = p.kind === 'cut' && sh > sw * 1.3;
         const along = p.kind === 'cut' ? (vertical ? sh : sw) : Math.max(room * 1.6, Math.min(sw, sh));
         let fs = Math.min(13 * LS, room / 2.6);
-        ctx.font = `600 ${fs}px ${FONT}`; const tw = ctx.measureText(txt).width; if (tw > along - 6) fs *= (along - 6) / tw;
-        if (fs < 6.5 * LS) continue;
-        ctx.font = `600 ${fs}px ${FONT}`; ctx.fillStyle = p.sliver ? '#8B1A12' : C.ink;
-        ctx.save(); ctx.translate(c[0], c[1]); if (vertical) ctx.rotate(-Math.PI / 2);
-        ctx.fillText(txt, 0, o.ids ? -fs * 0.55 : 0);
-        if (o.ids) { ctx.font = `${fs * 0.85}px ${FONT}`; ctx.fillStyle = C.gun; ctx.fillText('#' + p.id, 0, fs * 0.6); }
-        ctx.restore();
-      } else if (o.ids && room > 12 * LS) { ctx.font = `${Math.min(11 * LS, room / 2.5)}px ${FONT}`; ctx.fillStyle = C.gun; ctx.fillText('#' + p.id, c[0], c[1]); }
+        ctx.font = `600 ${fs}px ${FONT}`; let tw = ctx.measureText(txt).width; if (tw > along - 6) { fs *= (along - 6) / tw; tw = along - 6; }
+        if (fs < minFs) continue;
+        const hh = fs * (o.ids ? 2.3 : 1.2), ww = tw + 2;
+        const r = vertical ? { x: c[0] - hh / 2, y: c[1] - ww / 2, w: hh, h: ww } : { x: c[0] - ww / 2, y: c[1] - hh / 2, w: ww, h: hh };
+        const draw = () => {
+          ctx.save(); ctx.globalAlpha = alpha; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.font = `600 ${fs}px ${FONT}`; ctx.fillStyle = p.sliver ? '#8B1A12' : C.ink;
+          ctx.translate(c[0], c[1]); if (vertical) ctx.rotate(-Math.PI / 2);
+          ctx.fillText(txt, 0, o.ids ? -fs * 0.55 : 0);
+          if (o.ids) { ctx.font = `${fs * 0.85}px ${FONT}`; ctx.fillStyle = C.gun; ctx.fillText('#' + p.id, 0, fs * 0.6); }
+          ctx.restore();
+        };
+        if (auto) o.deferred.push({ ...r, pr: (p.sliver ? 1e6 : 0) + fs, draw }); else { o.taken.push(r); draw(); }
+      } else if (o.ids && room > 12 * LS) {
+        const fs = Math.min(11 * LS, room / 2.5); if (auto && fs < 7 * LS) continue;
+        const draw = () => { ctx.save(); ctx.globalAlpha = alpha; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = `${fs}px ${FONT}`; ctx.fillStyle = C.gun; ctx.fillText('#' + p.id, c[0], c[1]); ctx.restore(); };
+        const r = { x: c[0] - fs, y: c[1] - fs / 2, w: fs * 2, h: fs };
+        if (auto) o.deferred.push({ ...r, pr: fs, draw }); else draw();
+      }
     }
   }
 
-  function setoutOverlay(ctx, f, region, ref, LS) {
+  function setoutOverlay(ctx, f, region, ref, LS, o) {
     const P = ref.P; const bb = region.bb; const big = Math.hypot(bb.w, bb.h) * 1.5;
     ctx.save(); ctx.beginPath(); path(ctx, region.outline, f); ctx.clip();
     ctx.strokeStyle = 'rgba(21,128,61,0.9)'; ctx.lineWidth = 1.6 * LS; ctx.setLineDash([10, 5]);
@@ -211,9 +242,10 @@
     ctx.strokeStyle = C.green; ctx.fillStyle = C.green; ctx.lineWidth = 1 * LS; ctx.font = `700 ${11 * LS}px ${FONT}`;
     const L = f([bb.x0, P[1]]), B = f([P[0], bb.y0]);
     ctx.beginPath(); ctx.moveTo(L[0], L[1]); ctx.lineTo(q[0], q[1]); ctx.moveTo(B[0], B[1]); ctx.lineTo(q[0], q[1]); ctx.stroke();
-    const tag = (x, y, t) => { const tw = ctx.measureText(t).width; ctx.fillStyle = 'rgba(255,255,255,0.92)'; ctx.fillRect(x - tw / 2 - 3, y - 8 * LS, tw + 6, 16 * LS); ctx.fillStyle = C.green; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(t, x, y); };
+    const tag = (x, y, t, vert) => { const tw = ctx.measureText(t).width; if (o && o.labelMode === 'none') return; if (o && o.taken && !vert && !fits(o, { x: x - tw / 2 - 3, y: y - 8 * LS, w: tw + 6, h: 16 * LS })) return; ctx.fillStyle = 'rgba(255,255,255,0.92)'; ctx.fillRect(x - tw / 2 - 3, y - 8 * LS, tw + 6, 16 * LS); ctx.fillStyle = C.green; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(t, x, y); };
     tag((L[0] + q[0]) / 2, q[1] - 10 * LS, `${Math.round(ref.dims.left)}`);
-    ctx.save(); ctx.translate(q[0] + 10 * LS, (B[1] + q[1]) / 2); ctx.rotate(-Math.PI / 2); tag(0, 0, `${Math.round(ref.dims.bottom)}`); ctx.restore();
+    { const t = `${Math.round(ref.dims.bottom)}`; const tw = ctx.measureText(t).width; const cx = q[0] + 10 * LS, cy = (B[1] + q[1]) / 2;
+      if (!o || !o.taken || fits(o, { x: cx - 8 * LS, y: cy - tw / 2 - 3, w: 16 * LS, h: tw + 6 })) { ctx.save(); ctx.translate(cx, cy); ctx.rotate(-Math.PI / 2); tag(0, 0, t, true); ctx.restore(); } }
   }
 
   function labelPoint(poly, b) {
@@ -250,6 +282,7 @@
       if (editable) { const tw = ctx.measureText(t).width; ctx.fillStyle = '#fff'; ctx.strokeStyle = C.bronze; ctx.lineWidth = 1.5; roundRect(ctx, -tw / 2 - 6, -11, tw + 12, 22, 6); ctx.fill(); ctx.stroke(); ctx.fillStyle = '#9A5F1C'; }
       else ctx.fillStyle = C.gun;
       ctx.fillText(t, 0, 0); ctx.restore();
+      if (o.taken) { const tw = ctx.measureText(t).width; const vert = Math.abs(Math.sin(ang)) > 0.7; o.taken.push(vert ? { x: mx - fs * 0.6, y: my - tw / 2, w: fs * 1.2, h: tw } : { x: mx - tw / 2, y: my - fs * 0.6, w: tw, h: fs * 1.2 }); }
       if (o.dimHits) o.dimHits.push({ surfId: it.surface.id, i, x: mx, y: my, len });
     }
   }
@@ -267,7 +300,7 @@
     const bb = itemsBBox(items);
     const v = makeView(bb, W, H, opts.pad || 60);
     if (items.length > 1) v.cy += 10 / v.s;
-    scene(ctx, W, H, v, items.map(i => ({ ...i, selected: false })), { paper: '#FFFFFF', dimFont: opts.dimFont || 13, ids: opts.ids, labelScale: opts.labelScale || 1, setout: opts.setout, noBg: !opts.withBg });
+    scene(ctx, W, H, v, items.map(i => ({ ...i, selected: items.length > 1 ? false : true })), { paper: '#FFFFFF', dimFont: opts.dimFont || 13, ids: opts.ids, labelScale: opts.labelScale || 1, setout: opts.setout, noBg: !opts.withBg, labelMode: opts.labelMode || 'auto', multi: false });
     return cv;
   }
 

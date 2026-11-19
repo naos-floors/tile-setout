@@ -46,7 +46,7 @@
   }
   function h2(doc, y, t) { doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...BRONZE); doc.text(t, M, y); doc.setTextColor(...INK); doc.setFont('helvetica', 'normal'); return y + 2.5; }
 
-  function matRows(m) {
+  function matRows(m, showTh = true) {
     const rows = [];
     rows.push(['Tiled area', `${m.m2.toFixed(2)} m²`, '']);
     m.tiles.forEach(t => rows.push([`Tiles ${t.label}`, `${t.needed} needed · ${t.order} with ${m.spare}% spare`, t.boxes != null ? `${t.boxes} boxes` : `${t.m2.toFixed(2)} m²`]));
@@ -56,7 +56,7 @@
     if (m.primer.litres > 0) rows.push([m.primer.name, `${m.primer.litres.toFixed(1)} L`, `${m.primer.units} × ${m.primer.unitL} L`]);
     if (m.trim.m > 0) rows.push(['Trim', `${m.trim.m.toFixed(1)} m`, `${m.trim.lengths} lengths`]);
     if (m.spacers.count > 0) rows.push(['Spacers / clips', `${m.spacers.count}`, `${m.spacers.packs} packs`]);
-    (m.thresholds || []).forEach(t => rows.push([`Threshold: ${t.name}`, '', `${t.w} mm`]));
+    if (showTh) (m.thresholds || []).forEach(t => rows.push([`Threshold: ${t.name}`, '', `${t.w} mm`]));
     (m.units || []).forEach(u => rows.push([`Under ${u.name}`, `${u.m2.toFixed(2)} m² (about ${u.tiles} tiles)`, 'included']));
     return rows;
   }
@@ -74,7 +74,7 @@
     return y + 5;
   }
 
-  function areaSection(doc, it, y, opts, newPage, showDrawing) {
+  function areaSection(doc, it, y, opts, newPage, showDrawing, job = {}) {
     const s = it.surface, st = it.res.stats, p = s.pattern, t = it.tile;
     doc.setFont('helvetica', 'bold'); doc.setFontSize(14); doc.text(`${it.room ? it.room.name + ' — ' : ''}${s.name}`, M, y); y += 5.5;
     doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...GUN);
@@ -94,7 +94,7 @@
     y = table(doc, y, multi ? [{ label: 'Tile', w: 26 }, { label: 'Piece', w: 62 }, { label: 'Qty', w: 12, align: 'right' }, { label: 'Source', w: 26 }, { label: 'Flag', w: 16 }, { label: 'Pieces', w: 40 }] : [{ label: 'Piece', w: 76 }, { label: 'Qty', w: 14, align: 'right' }, { label: 'Source', w: 30 }, { label: 'Flag', w: 18 }, { label: 'Pieces', w: 44 }], rows, { newPage });
     if (y > PH - 70) { newPage(); y = 27; }
     y = h2(doc, y, 'Materials for this area');
-    return table(doc, y, [{ label: 'Item', w: 72 }, { label: 'Quantity', w: 70 }, { label: 'Order', w: 40, align: 'right' }], matRows(it.mat), { newPage });
+    return table(doc, y, [{ label: 'Item', w: 72 }, { label: 'Quantity', w: 70 }, { label: 'Order', w: 40, align: 'right' }], matRows(it.mat, job.showThresholds !== false), { newPage });
   }
 
   function viewPages(doc, job, view, opts, ctx) {
@@ -106,8 +106,8 @@
       doc.setFont('helvetica', 'bold'); doc.setFontSize(14); doc.text(view.title, M, y); y += 5;
       doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...GUN); doc.text(`${items.length} areas set out together · ${items.reduce((a, i) => a + i.res.stats.needed, 0)} tiles`, M, y); doc.setTextColor(...INK); y += 3;
       drawingBlock(doc, items, y, 215, opts);
-      items.forEach(it => { ctx.newPage(); areaSection(doc, it, 27, opts, ctx.newPage, true); });
-    } else areaSection(doc, items[0], y, opts, ctx.newPage, true);
+      items.forEach(it => { ctx.newPage(); areaSection(doc, it, 27, opts, ctx.newPage, true, job); });
+    } else areaSection(doc, items[0], y, opts, ctx.newPage, true, job);
   }
 
   async function exportJob(job, views, totals, opts = {}) {

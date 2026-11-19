@@ -195,7 +195,7 @@
       });
       const cov = c.mat.adhesive.coverage; adhByCov.set(cov, (adhByCov.get(cov) || 0) + c.mat.m2);
       groutKg += c.mat.grout.kg; primerL += c.mat.primer.litres; trimM += c.mat.trim.m; spacers += c.mat.spacers.count;
-      c.mat.thresholds.forEach(t => thresholds.push({ ...t, where: surface.name }));
+      (c.res.doorways || []).forEach(d => { const pl = surface.kind === 'floor' ? (surface.place || { x: 0, y: 0 }) : null; if (!pl || !d.pts) return; thresholds.push({ name: d.name || 'Doorway', w: Math.round(+d.w), where: surface.name, mid: [(d.pts[0][0] + d.pts[1][0]) / 2 + pl.x, (d.pts[0][1] + d.pts[1][1]) / 2 + pl.y] }); });
       underM2 += c.mat.units.reduce((s, u) => s + u.m2, 0);
     }
     const rows = [];
@@ -216,7 +216,11 @@
     if (primerL > 0) rows.push([mat.primerName, `${fmt(primerL, 1)} L`, `${Math.ceil(primerL / (+mat.primerUnitL || 5) - 1e-9)} × ${mat.primerUnitL} L`]);
     if (trimM > 0) rows.push(['Trim', `${fmt(trimM, 1)} m`, `${Math.ceil(trimM / (+mat.trimLengthM || 2.5) - 1e-9)} × ${mat.trimLengthM} m`]);
     if (spacers > 0) rows.push(['Spacers / levelling clips', `${Math.ceil(spacers)}`, `${Math.ceil(spacers / (+mat.spacerPack || 100))} packs`]);
-    thresholds.forEach(t => rows.push([`Threshold: ${t.name}`, `${t.where}`, `${t.w} mm`]));
+    if (job.showThresholds !== false) {
+      // one threshold per doorway, even when both rooms have it
+      const uniq = []; thresholds.forEach(t => { const d = uniq.find(u => Math.hypot(u.mid[0] - t.mid[0], u.mid[1] - t.mid[1]) < 150 && Math.abs(u.w - t.w) < 30); if (d) { if (!d.where.includes(t.where)) d.where += ' / ' + t.where; } else uniq.push({ ...t }); });
+      uniq.forEach(t => rows.push([`Threshold: ${t.name}`, `${t.where}`, `${t.w} mm`]));
+    }
     if (underM2 > 0) rows.push(['Of which under units', `${fmt(underM2, 2)} m²`, '']);
     return { all, rows, area };
   }
@@ -411,7 +415,7 @@
         <div class="card"><h2>Automatic drawing reading (optional)</h2>
           <div class="grid">${f('apiKey', 'Anthropic API key', 'password', 'g', 'autocomplete="off" placeholder="sk-ant-…"')}${f('model', 'Model', 'text', 'g')}</div>
           <div class="note">Only needed for the in-app <b>Read drawing</b> button, which only works with signal. The key is stored on this device only. Without a key you can send a drawing to Claude with the ready-made prompt and paste the reply in.</div></div>
-        <div class="note">Version 2.0 · Naos Floors internal tool. Quantities are a guide: always check on site and follow BS 5385 and manufacturers’ instructions.</div>
+        <div class="note">Version 2.1 · Naos Floors internal tool. Quantities are a guide: always check on site and follow BS 5385 and manufacturers’ instructions.</div>
       </div></div>`;
     app.onclick = async e => {
       if (e.target.closest('[data-a="back"]')) history.length > 1 ? history.back() : location.hash = '';
@@ -455,7 +459,7 @@
         ${job.rooms.length ? `<div class="row" style="margin-bottom:12px"><button class="btn" data-a="addroom">+ Room</button><button class="btn sec" data-a="quickroom">+ Quick room (4 walls + floor)</button><button class="btn sec" data-a="combine">⧉ Combine areas</button></div>` : ''}
         <div class="card"><h2>Tiles on this job<span class="sp"></span><button class="btn sec sm" data-a="addtile">+ Tile</button></h2>
           <div class="list">${!job.tiles.length ? '<div class="muted">No tiles yet. Tap <b>+ Tile</b> to pick a size.</div>' : ''}${job.tiles.map(t => `<div class="item click" data-tile="${t.id}"><div class="main"><div class="t">${esc(t.name)}</div><div class="s">${t.w} × ${t.h} × ${t.thick} mm · ${+t.perBox ? t.perBox + ' per box' : +t.m2PerBox ? t.m2PerBox + ' m² per box' : '<span style="color:var(--red)">box size not set</span>'}</div></div><span class="muted">Edit ›</span></div>`).join('')}</div></div>
-        <div class="card"><h2>Order list — whole job</h2>
+        <div class="card"><h2>Order list — whole job<span class="sp"></span><label class="chk" style="font-size:13px;font-weight:400"><input type="checkbox" id="showTh" ${job.showThresholds !== false ? 'checked' : ''}> Door thresholds</label></h2>
           <table class="t"><tr><th>Item</th><th>Quantity</th><th class="n">Order</th></tr>${tot.rows.map(r => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td class="n"><b>${esc(r[2])}</b></td></tr>`).join('')}</table></div>
         <div class="card"><h2>Drawings → rooms</h2>
           <div class="muted" style="margin-bottom:8px">Turn a floor plan or elevations into rooms, walls, doorways and units ready to set out. Several elevations of one room open together as an unfolded view.</div>
@@ -465,6 +469,7 @@
         </div>
         <div class="row" style="margin-bottom:20px"><button class="btn sec" data-a="savefile">Save job file</button><button class="btn sec" data-a="copyjob">Copy job</button><button class="btn danger" data-a="deljob">Delete job</button></div>
       </div></div>`;
+    app.onchange = e => { if (e.target.id === 'showTh') { job.showThresholds = e.target.checked; save(); renderJob(); } };
     app.oninput = e => { const k = e.target.dataset.j; if (k) { job[k] = e.target.value; save(); if (k === 'name') $('.top h1').textContent = job.name; } };
     app.onclick = async e => {
       const t = e.target;
@@ -1003,7 +1008,7 @@
             ${v.mode === 'plan' ? '<button data-mode="arrange" title="Drag areas into place">⇄<span class="lbl"> Arrange</span></button>' : ''}${canFold ? '<button data-a="fold" title="See the floor with its walls folded out round it">▣<span class="lbl"> Fold out</span></button>' : ''}${v.mode === 'folded' ? `<button data-a="tofloor" title="Floor on its own">▭<span class="lbl"> Floor</span></button>${wallsGroupOf(v.floor) ? '<button data-a="towalls" title="Walls unfolded">▥<span class="lbl"> Walls</span></button>' : ''}` : ''}
             <span class="sp"></span><button data-noundo data-a="undo" title="Undo">↶</button><button data-noundo data-a="redo" title="Redo">↷</button><button data-a="fit" title="Fit to screen">⤢</button><button data-a="help" title="Help">?</button>
           </div>
-          <div class="dragopts" id="dragopts"><button data-a="snap" title="Snap tiles to walls, corners, centres and openings while dragging">🧲</button><button data-a="axis" title="Drag freely, or only across, or only up/down">✛</button></div>
+          <div class="dragopts" id="dragopts"><button data-a="labels" title="Labels: tidy / all / none">Aa</button><button data-a="snap" title="Snap tiles to walls, corners, centres and openings while dragging">🧲</button><button data-a="axis" title="Drag freely, or only across, or only up/down">✛</button></div>
           <div id="hint"></div>
           <div class="stat" id="stat"></div>
         </div>
@@ -1024,6 +1029,7 @@
       if (a === 'undo') undo(); if (a === 'redo') redo();
       if (a === 'export') exportModal('view');
       if (a === 'help') helpModal();
+      if (a === 'labels') { const order = ['auto', 'all', 'none']; S.settings.labelMode = order[(order.indexOf(S.settings.labelMode || 'auto') + 1) % 3]; Store.saveSettings(S.settings); setModeButtons(); requestDraw(); toast({ auto: 'Labels: tidy — overlapping ones hidden, tap a tile to see its size', all: 'Labels: all', none: 'Labels: off — tap a tile to see its size' }[S.settings.labelMode], 2500); }
       if (a === 'snap') { S.snapOn = !S.snapOn; setModeButtons(); toast(S.snapOn ? 'Snapping on' : 'Snapping off', 1200); }
       if (a === 'axis') { S.axis = { free: 'x', x: 'y', y: 'free' }[S.axis]; setModeButtons(); toast({ free: 'Drag in any direction', x: 'Drag across only ↔', y: 'Drag up/down only ↕' }[S.axis], 1400); }
       if (a === 'tofloor') { const sel = cur().surface; openView(v.floor.id); return; }
@@ -1047,7 +1053,7 @@
   function setMode(m) { S.mode = m; S.selVertex = -1; setModeButtons(); requestDraw(); }
   function setModeButtons() {
     $$('.tools [data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === S.mode && !S.trace && !S.calib && !S.opTrace)); renderHint();
-    const d = $('#dragopts'); if (d) { d.style.display = S.mode === 'move' && !S.trace && !S.calib && !S.opTrace ? '' : 'none'; const sb = $('[data-a="snap"]', d), ab = $('[data-a="axis"]', d); sb.classList.toggle('on', S.snapOn); ab.textContent = { free: '✛', x: '↔', y: '↕' }[S.axis]; ab.classList.toggle('on', S.axis !== 'free'); }
+    const d = $('#dragopts'); if (d) { const mv = S.mode === 'move' && !S.trace && !S.calib && !S.opTrace; $$('[data-a="snap"],[data-a="axis"]', d).forEach(b => { b.style.display = mv ? '' : 'none'; }); const lb = $('[data-a="labels"]', d); lb.textContent = { auto: 'Aa', all: 'AA', none: 'a̶' }[S.settings.labelMode || 'auto']; lb.classList.toggle('on', (S.settings.labelMode || 'auto') !== 'auto'); const sb = $('[data-a="snap"]', d), ab = $('[data-a="axis"]', d); sb.classList.toggle('on', S.snapOn); ab.textContent = { free: '✛', x: '↔', y: '↕' }[S.axis]; ab.classList.toggle('on', S.axis !== 'free'); }
   }
   function sizeCanvas() { if (!cv) return; const r = cv.parentElement.getBoundingClientRect(); const d = window.devicePixelRatio || 1; cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d); }
   function dims() { const d = window.devicePixelRatio || 1; return [cv.width / d, cv.height / d]; }
@@ -1080,7 +1086,7 @@
     ctx.setTransform(d, 0, 0, d, 0, 0);
     const items = sceneItems(S.dragging);
     S.dimHits = [];
-    Render.scene(ctx, W, H, S.view, items, { vertices: S.mode === 'edit', selVertex: S.selVertex, selOpening: S.selOpening, trace: S.trace, calib: S.calib || (S.opTrace && S.opTrace.length ? S.opTrace : null), ids: S.showIds, origins: originPoints(), dimHits: S.dimHits, setout: S.showSetout && !S.dragging && S.mode !== 'edit' && v.mode !== 'folded', multi: items.length > 1 });
+    Render.scene(ctx, W, H, S.view, items, { vertices: S.mode === 'edit', selVertex: S.selVertex, selOpening: S.selOpening, trace: S.trace, calib: S.calib || (S.opTrace && S.opTrace.length ? S.opTrace : null), ids: S.showIds, origins: originPoints(), dimHits: S.dimHits, labelMode: S.settings.labelMode || 'auto', setout: S.showSetout && !S.dragging && S.mode !== 'edit' && v.mode !== 'folded', multi: items.length > 1 });
     const el = $('#stat'); if (!el) return;
     if (S.dragging) { el.innerHTML = S.snapLabel ? `<span class="good">snapped: ${esc(S.snapLabel)}</span>` : '<span>moving…</span>'; return; }
     const tot = items.reduce((a, it) => { const st = it.res?.stats; if (!st) return a; a.n += st.needed; a.c += st.cuts; a.s += st.slivers; if (st.minCut != null) a.m = Math.min(a.m, st.minCut); return a; }, { n: 0, c: 0, s: 0, m: Infinity });
@@ -1137,6 +1143,9 @@
       if (g) { endGesture(g, pos(e)); g = null; }
     };
     cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+    let hoverT = 0;
+    cv.addEventListener('pointermove', e => { if (e.pointerType !== 'mouse' || e.buttons || ptrs.size) return; const now = Date.now(); if (now - hoverT < 60) return; hoverT = now; const p = pos(e); showPieceTip(world(...p), p, 0); });
+    cv.addEventListener('pointerleave', () => hideTip());
     cv.addEventListener('wheel', e => {
       e.preventDefault(); const p = pos(e); const w0 = world(...p); const [W, H] = dims();
       const s = Math.max(0.005, Math.min(20, S.view.s * Math.exp(-e.deltaY * 0.0015)));
@@ -1178,7 +1187,7 @@
       const dx = p[0] - g.p0[0], dy = p[1] - g.p0[1];
       if (!g.moved && Math.hypot(dx, dy) < 6) return;
       if (!g.moved && g.type !== 'pan' && g.type !== 'tap') checkpoint();
-      g.moved = true;
+      g.moved = true; hideTip();
       const { surface } = cur(); const s = S.view.s;
       const wdx = dx / s, wdy = -dy / s;
       if (g.type === 'pan' || g.type === 'tap') { S.view = { ...g.v0, cx: g.v0.cx - dx / s, cy: g.v0.cy + dy / s }; requestDraw(); return; }
@@ -1272,8 +1281,9 @@
         if (S.selOpening >= 0 && S.tab !== 'openings') { S.tab = 'openings'; $$('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === 'openings')); renderPane(); }
         S.selVertex = -1; requestDraw(); return;
       }
-      // other modes: tap selects an area in a combined view
+      // other modes: tap shows the tile's size, and selects an area in a combined view
       const t = memberAt(w); if (t && t.id !== S.selId) selectMember(t.id);
+      showPieceTip(w, p, 4000);
     }
   }
   /* snap a point (area's own coords) to corners, then edges, of the outline and openings */
@@ -1320,6 +1330,31 @@
     const bx = best(T.X, ex, cx), by = best(T.Y, ey, cy);
     if (!bx && !by) return null;
     return [bx ? bx.d : 0, by ? by.d : 0, [bx && `↔ ${bx.l}`, by && `↕ ${by.l}`].filter(Boolean).join(' · ')];
+  }
+  function pieceAt(w) {
+    const v = curView(); if (!v) return null;
+    for (const { surface } of v.members) {
+      const c = calc(surface); if (!c.res) continue; const q = toLocal(v, surface, w);
+      for (const p of c.res.pieces) { const b = Geo.bbox(p.poly[0]); if (q[0] < b.x0 || q[0] > b.x1 || q[1] < b.y0 || q[1] > b.y1) continue; if (Geo.pointInRing(q, p.poly[0]) && !p.poly.slice(1).some(h => Geo.pointInRing(q, h))) return { p, surface, res: c.res }; }
+    }
+    return null;
+  }
+  let tipT = null;
+  function hideTip() { const t = $('#tip'); if (t) t.style.display = 'none'; }
+  function showPieceTip(w, sp, ms) {
+    const hit = pieceAt(w); const wrap = cv?.parentElement; if (!wrap) return;
+    let t = $('#tip'); if (!t) { t = document.createElement('div'); t.id = 'tip'; t.className = 'tip'; wrap.appendChild(t); }
+    if (!hit) { hideTip(); return; }
+    const { p, surface, res } = hit; const sz = res.sizes[p.sizeIdx];
+    const kind = p.kind === 'full' ? 'Full tile' : p.kind === 'cut' ? 'Cut' : p.kind === 'notch' ? 'Notched' : 'Angled cut';
+    let txt = `<b>${kind} ${Math.round(p.w)} × ${Math.round(p.h)}</b>`;
+    if (p.kind === 'notch' && p.notch?.w) txt += `<br>notch ${Math.round(p.notch.w)} × ${Math.round(p.notch.h)}`;
+    if (p.kind === 'angled' && p.sides) txt += `<br>sides ${p.sides.join(' · ')}`;
+    txt += `<br><span>#${p.id} · ${esc(surface.name)}${res.sizes.length > 1 ? ' · ' + esc(sz.label) : ''}${p.source === 'offcut' ? ` · from offcut${p.offcutFrom ? ' of ' + esc(p.offcutFrom) : ''}` : ''}${p.sliver ? ' · <b style="color:#FCA5A5">sliver</b>' : ''}</span>`;
+    t.innerHTML = txt; t.style.display = 'block';
+    const W = wrap.clientWidth; const x = Math.min(Math.max(8, sp[0] + 14), W - 220), y = Math.max(8, sp[1] - 60);
+    t.style.left = x + 'px'; t.style.top = y + 'px';
+    clearTimeout(tipT); if (ms) tipT = setTimeout(hideTip, ms);
   }
   function selectMember(id) { S.selId = id; S.selOpening = -1; S.selVertex = -1; history.replaceState(null, '', `#/job/${S.job.id}/v/${S.viewId}/${id}`); renderPane(); requestDraw(); toast(`Selected ${findSurface(id).surface.name}`, 1200); }
   function segDist(p, a, b) { const dx = b[0] - a[0], dy = b[1] - a[1]; const l = dx * dx + dy * dy || 1; let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l; t = Math.max(0.1, Math.min(0.9, t)); return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); }
@@ -1567,7 +1602,7 @@
   }
   function paneOrder(s) {
     const v = curView(); const c = calc(s); if (!c.res) return '<div class="empty">Set up the shape first.</div>';
-    const rows = PDFX.matRows(c.mat);
+    const rows = PDFX.matRows(c.mat, S.job.showThresholds !== false);
     let viewTot = '';
     if (v.members.length > 1) {
       const t = v.members.reduce((a, { surface }) => { const cc = calc(surface); if (!cc.res) return a; a.m2 += cc.mat.m2; a.n += cc.res.stats.needed; a.o += cc.mat.tiles.reduce((x, y) => x + y.order, 0); return a; }, { m2: 0, n: 0, o: 0 });

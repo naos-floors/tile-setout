@@ -1,5 +1,5 @@
 /* Offline cache for Naos Tile Set-out. Bump VERSION when files change. */
-const VERSION = 'tso-v2.0.0';
+const VERSION = 'tso-v2.1.0';
 const FILES = ['./', './index.html', './manifest.webmanifest', './css/app.css',
   './js/geometry.js', './js/store.js', './js/render.js', './js/ai.js', './js/pdf-export.js', './js/cloud.js', './js/app.js',
   './vendor/polygon-clipping.umd.min.js', './vendor/jspdf.umd.min.js', './vendor/pdf.min.js', './vendor/pdf.worker.min.js', './vendor/msal-browser.min.js',

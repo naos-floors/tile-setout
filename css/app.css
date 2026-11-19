@@ -101,3 +101,6 @@ textarea.code{width:100%;min-height:160px;font-family:ui-monospace,Menlo,monospa
 .dragopts{position:absolute;right:8px;top:54px;display:flex;flex-direction:column;gap:5px;z-index:1}
 .dragopts button{background:rgba(255,255,255,.95);border:1px solid var(--line);border-radius:8px;width:40px;height:38px;font-size:17px;color:var(--gun-d);box-shadow:0 1px 3px rgba(0,0,0,.06)}
 .dragopts button.on{background:var(--bronze-l);border-color:var(--bronze);color:var(--bronze-d)}
+
+.tip{position:absolute;display:none;z-index:3;background:rgba(46,47,49,.95);color:#fff;border-radius:8px;padding:7px 10px;font-size:13px;line-height:1.35;pointer-events:none;max-width:220px;box-shadow:0 4px 12px rgba(0,0,0,.2)}
+.tip span{color:#D1D5DB;font-size:12px}
